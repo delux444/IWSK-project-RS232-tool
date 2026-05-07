@@ -71,7 +71,7 @@ const char* control_to_string(enum control);
 
 void print_help(const char *);
 
-volatile sig_atomic_t stop = 0;
+volatile int stop = 0;
 void handle_sigint(int sig) {
     stop = 1;
 }
@@ -330,6 +330,7 @@ void setup_termios(struct termios *term, struct userinput *usr){
     // liczba bitow danych
     term->c_cflag &= ~CSIZE;
     term->c_cflag |= usr->databits;
+    term->c_cc[VMIN] = 0;
 
     // parity
     if(usr->par == N) {
@@ -394,7 +395,7 @@ void listen_device(int fd) {
 
     //fd - deskryptor portu szeregowego
 
-    while(!stop){
+    while(stop == 0){
 
         ssize_t n = read(fd, buf, sizeof(buf));
 
