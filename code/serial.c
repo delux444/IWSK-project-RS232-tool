@@ -8,10 +8,13 @@
 #include <fcntl.h>
 #include <dirent.h>
 
+#include <time.h>
+#include <sys/select.h>
+
 
 
 enum mode{
-    RECEIVE, SEND, NOACTION
+    RECEIVE, SEND, NOACTION, PING
 };
 enum parity{
     N, E, O, UNKNOWN //dodatkowy bit - ustawiamy wartosc, aby laczna ilosc jedynek byla parzysta lub nieparzysta
@@ -43,7 +46,7 @@ struct userinput{
     enum parity par;
     enum control con;
     speed_t baudrate; //zamiast liczb wpisuje sie stale np. B9600
-    tcflag_t databits; //przechowuje flagi konfiguracyjne terminala - okreslaja liczbe bitow w ramce danych (CS5, CS6, CS7, CS8) - 5 - 8 bitow
+    tcflag_t databits; // liczba bitow pola danych w ramce danych (CS5, CS6, CS7, CS8) - 5 - 8 bitow
     int stopbits;
 };
 
@@ -70,6 +73,7 @@ const char* parity_to_string(enum parity);
 const char* control_to_string(enum control);
 
 void print_help(const char *);
+void ping_device(int fd, struct device *dev);
 
 volatile int stop = 0;
 void handle_sigint(int sig) {
@@ -81,6 +85,7 @@ int main(int argc, char *argv[]){
 
     struct termios term;
     struct device dev = {NOACTION, NULL, NULL, NULL};
+    //default values
     struct userinput usr = {N, NOCONTROL, B9600, CS7, 1};
 
     if(handle_input(argc, argv, &dev, &usr) == -1) { return -1; }
@@ -98,26 +103,26 @@ int main(int argc, char *argv[]){
         return -1;
     }
 
-    if(!dev.name){
-        fprintf(stderr, "Device not specified\n");
-        return -1;
-    }
 
-    //otwieramy plik, read and write, NOCTTY - niezaleznosc od urzadzenia, do ktorego sie podlaczymy
+    //otwieramy plik, read and write, 
+    //NOCTTY - podlaczone urzedzenie nie bedzie terminalem sterujacym dla mojego programu
     int fd = open(dev.name, O_RDWR | O_NOCTTY);
     if(fd < 0){
         perror("open failed");
         return -1;
     }
 
+    //getting old conf
     if(tcgetattr(fd, &term) < 0){
         perror("tcgetattr failed");
         close(fd);
         return -1;
     }
 
+    //modyfing conf to our needs
     setup_termios(&term, &usr);
 
+    //setting new conf
     if(tcsetattr(fd, TCSANOW, &term) < 0){
         perror("tcsetattr failed");
         close(fd);
@@ -137,6 +142,9 @@ int main(int argc, char *argv[]){
     }
     else if(dev.md == RECEIVE){
         listen_device(fd);
+    }
+    else if(dev.md == PING){
+        ping_device(fd, &dev);
     }
 
     close(fd);
@@ -220,7 +228,10 @@ int handle_input(int argc, char *argv[], struct device *dev, struct userinput *u
             case 't':
             {
                 char *tmp = parse_terminator(optarg);
-                if(!tmp) { fprintf(stderr, "Invalid terminator\n"); return -1; }
+                if (tmp == (char*)-1) {
+                    fprintf(stderr, "Error: Terminator '%s' is too long. Max 2 characters.\n", optarg);
+                    return -1;
+                }
                 free(dev->terminator);
                 dev->terminator = tmp;
                 break;
@@ -308,11 +319,21 @@ char* parse_terminator(const char *str){
     else if(strcmp(str, "CR") == 0) { return strdup("\r"); }
     else if(strcmp(str, "CRLF") == 0) { return strdup("\r\n"); }
 
-    return NULL;
+    if(strcasecmp(str, "none") == 0) { return NULL; }
+
+    size_t len = strlen(str);
+    if (len > 2) {
+        return (char*)-1; // Return error sentinel if too long
+    }
+
+
+    return strdup(str);
+
 }
 enum mode parse_mode(const char *str){
     if(strcmp(str, "receive") == 0 || strcmp(str, "recv") == 0) { return RECEIVE; }
     else if(strcmp(str, "send") == 0) { return SEND; }
+    else if (strcmp(str, "ping") == 0) { return PING; }
     else if(strcmp(str, "none") == 0) { return NOACTION; }
 
     return NOACTION;
@@ -321,16 +342,21 @@ enum mode parse_mode(const char *str){
 /* TERMIOS CONFIG */
 void setup_termios(struct termios *term, struct userinput *usr){
 
+    //without it works as terminal - waits for enter
+    //now it behaves as raw device
     cfmakeraw(term);  // ❗ ważne
+
+    //turing off echo
+    term->c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
 
     //predkosc wejsciowa i wyjsciowa - takie same (jedno urzadzenie, dwa kierunki)
     cfsetispeed(term, usr->baudrate); //listen
     cfsetospeed(term, usr->baudrate);//speak
 
     // liczba bitow danych
-    term->c_cflag &= ~CSIZE;
+    term->c_cflag &= ~CSIZE; //all zeros
     term->c_cflag |= usr->databits;
-    term->c_cc[VMIN] = 0;
+    term->c_cc[VMIN] = 0; //minimal read characters
 
     // parity
     if(usr->par == N) {
@@ -374,6 +400,8 @@ int write_to_device(int fd, char *data, char *terminator){
         if(write_all(fd, data, strlen(data)) < 0) { return -1; }
     }
 
+
+    // what if terminator is null
     if(terminator){
         if (write_all(fd, terminator, strlen(terminator)) < 0) { return -1; }
     }
@@ -397,17 +425,40 @@ void listen_device(int fd) {
 
     while(stop == 0){
 
-        ssize_t n = read(fd, buf, sizeof(buf));
+        ssize_t n = read(fd, buf, sizeof(buf)-1);//space for null terminator
+       
+        const char *C_YELLOW = "\033[33m";
+        const char *C_RESET  = "\033[0m";
+        const char *PING_MSG = "\n[Auto-replied to PING]\n";
 
         if(n > 0){
-            ssize_t written = 0;
-            while(written < n){
+             buf[n] = '\0';
 
-                //poczatek i liczba znakow jakie zostaly do wyswietlenia
-                ssize_t w = write(STDOUT_FILENO, buf + written, n - written);
-                if(w <= 0){ perror("stdout write failed"); return; }
-                written += w;
+             if (strstr(buf, "PING") != NULL) { //if one string is inside the other
+                const char *reply = "PONG\n";
+                write_all(fd, reply, strlen(reply));
+             
+            
+                write_all(STDOUT_FILENO, C_YELLOW, strlen(C_YELLOW));
+                write_all(STDOUT_FILENO, PING_MSG, strlen(PING_MSG));
+                write_all(STDOUT_FILENO, C_RESET, strlen(C_RESET));
             }
+         else {
+                // 3. To wykonuje się TYLKO, gdy nie wykryto PING
+                ssize_t written = 0;
+                while(written < n){
+                    ssize_t w = write(STDOUT_FILENO, buf + written, n - written);
+                    if(w <= 0) return;
+                    written += w;
+                }
+           
+            }
+
+          
+            write_all(STDOUT_FILENO, C_RESET, strlen(C_RESET));
+
+
+            
         }
         else if (n < 0) { perror("read failed"); return; }
     }
@@ -443,10 +494,10 @@ void print_help(const char *prog){
 
     printf(C_BOLD C_CYAN "\nTransfer:\n" C_RESET);
     printf("  -T, --transfer <data>      Data to send\n");
-    printf("  -t, --terminator <CR|LF|CRLF>\n");
+    printf("  -t, --terminator <CR|LF|CRLF|none>\n");
 
     printf(C_BOLD C_CYAN "\nMode:\n" C_RESET);
-    printf("  -m, --mode <send|recv|listen|none>\n");
+    printf("  -m, --mode <send|recv|receive|none|ping>\n");
 
     printf(C_BOLD C_CYAN "\nListing:\n" C_RESET);
     printf("  -l, --list                 List available serial devices in /dev\n");
@@ -555,6 +606,8 @@ const char* control_to_string(enum control c){
 
 
 void list_serial_devices() {
+
+    //catalog metadate 
     DIR *dir;
     struct dirent *entry;
 
@@ -573,13 +626,14 @@ void list_serial_devices() {
         if (strncmp(name, "ttyUSB", 6) == 0 ||   // Linux: USB-Serial adapters
             strncmp(name, "ttyACM", 6) == 0 ||   // Linux: USB Modems/Arduinos
             strncmp(name, "ttyS", 4) == 0 ||     // Linux: Hardware Serial ports
+            strncmp(name, "ttys", 4) == 0 ||
             strncmp(name, "cu.", 3) == 0 ||      // Mac: Call-out devices (Preferred)
             strncmp(name, "tty.", 4) == 0)       // Mac: Interactive terminal devices
         {
             // Filter out common internal Mac noise (Bluetooth/AirPort/Internal Modems)
             if (strstr(name, "Bluetooth") == NULL && 
                 strstr(name, "Wireless") == NULL && 
-                strstr(name, "Soc") == NULL) 
+                strstr(name, "Soc") == NULL) //Soc - system on chip - internal interfaces
             {
                 printf("  /dev/%s\n", name);
                 found = 1;
@@ -595,3 +649,51 @@ void list_serial_devices() {
 }
 
 
+void ping_device(int fd, struct device *dev) {
+    char *ping_msg = dev->data ? dev->data : "PING";
+    char buf[256];
+    struct timespec start, end;
+    
+    printf("Pinging %s with \"%s\"...\n", dev->name, ping_msg);
+
+    // start time
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    // send the ping
+    if (write_to_device(fd, ping_msg, dev->terminator) < 0) {
+        return;
+    }
+
+    // setup timeout using select() - no blocking read
+    fd_set read_fds; //ports to observe for incoming data
+    struct timeval timeout;
+    FD_ZERO(&read_fds); //cleaning
+    FD_SET(fd, &read_fds); //adding fd to list
+
+    timeout.tv_sec = 2; //waiting time
+    timeout.tv_usec = 0;
+
+    int sel = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+
+    if (sel == -1) {
+        perror("select failed");
+    } else if (sel == 0) {
+        printf("Ping timeout: No response from device.\n");
+    } else {
+        // Read the response
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            // end time
+            clock_gettime(CLOCK_MONOTONIC, &end);
+
+            //miliseconds
+            double elapsed = (end.tv_sec - start.tv_sec) * 1000.0 +
+                             (end.tv_nsec - start.tv_nsec) / 1000000.0;
+
+            printf("Received response: \"%s\" | RTT = %.3f ms\n", buf, elapsed);
+        } else {
+            printf("Error reading response.\n");
+        }
+    }
+}
