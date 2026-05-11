@@ -15,6 +15,7 @@ and test equipment.
 
 Serial communication transmits bits **one at a time** over a single data line. In RS-232, logic states are represented as voltages:
 
+
 <div align="center">
   
 | Logic State | Voltage (TxD/RxD) |
