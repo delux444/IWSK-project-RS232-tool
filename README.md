@@ -1,7 +1,7 @@
 # SerialCtrl — Serial Port Communication Tool
 
 A Linux command-line application written in C for RS-232/UART serial port communication. Supports full port configuration,
-text and binary transmission modes, link testing (PING), transactions with timeout, and manual modem line control.
+\ntext and binary transmission modes, link testing (PING), transactions with timeout, and manual modem line control.
 
 ---
 
