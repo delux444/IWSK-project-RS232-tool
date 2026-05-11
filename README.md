@@ -116,8 +116,8 @@ Without this step, opening `/dev/ttyUSB*` or `/dev/ttyACM*` may return a permiss
 
 ```bash
 sudo usermod -aG dialout $USER
-# Log out and back in for the change to take effect
 ```
+    Log out and back in for the change to take effect
 
 ### 3. Compile
 
@@ -136,11 +136,14 @@ After this you can run `serialctrl` from anywhere without `./`.
 ### 5. Verify
 
 ```bash
-./serialctrl -h        # show help
+./serialctrl -h
 ```
+    # show help
+
 ```bash
-./serialctrl -l        # list available serial ports
+./serialctrl -l
 ```
+    # list available serial ports
 
 ---
 
@@ -186,53 +189,53 @@ serialctrl -d <port> [options]
 
 ### Examples
 
+    # List all detected serial ports
 ```bash
-# List all detected serial ports
 ./serialctrl -l
 ```
 
+    # Interactive TX/RX at 115200 baud with CR+LF terminator
 ```bash
-# Interactive TX/RX at 115200 baud with CR+LF terminator
 ./serialctrl -d /dev/ttyUSB0 -b 115200 -t CRLF
 ```
 
+    # Send a one-shot message and exit
 ```bash
-# Send a one-shot message and exit
 ./serialctrl -d /dev/ttyUSB0 -b 9600 -m "Hello" -t LF
 ```
 
+    # PING test with LF terminator
 ```bash
-# PING test with LF terminator
 ./serialctrl -d /dev/ttyUSB0 --ping -t LF
 ```
 
+    # Transaction with 500 ms timeout
 ```bash
-# Transaction with 500 ms timeout
 ./serialctrl -d /dev/ttyUSB0 -m "STATUS?" -t CRLF --transaction --timeout 500
 ```
 
+    # Binary mode — send bytes 0x01 0x02 0x03
 ```bash
-# Binary mode — send bytes 0x01 0x02 0x03
 ./serialctrl -d /dev/ttyUSB0 --binary -m "010203"
 ```
 
+    # Listen-only mode at 19200 baud
 ```bash
-# Listen-only mode at 19200 baud
 ./serialctrl -d /dev/ttyUSB0 --listen -b 19200
 ```
 
+    # Hardware RTS/CTS flow control
 ```bash
-# Hardware RTS/CTS flow control
 ./serialctrl -d /dev/ttyUSB0 -b 9600 -f 1
 ```
 
+    # Set DTR high and display modem line status
 ```bash
-# Set DTR high and display modem line status
 ./serialctrl -d /dev/ttyUSB0 --set-dtr 1 --monitor
 ```
 
+    # 7 data bits, even parity, 2 stop bits at 4800 baud
 ```bash
-# 7 data bits, even parity, 2 stop bits at 4800 baud
 ./serialctrl -d /dev/ttyUSB0 -s 7 -p E -S 2 -b 4800
 ```
 ---
