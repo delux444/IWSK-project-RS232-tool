@@ -25,6 +25,8 @@ Serial communication transmits bits **one at a time** over a single data line. I
 
 </div>
 
+<br><br>
+
 Each data frame consists of:
 - **1 start bit** (always `0`)
 - **5–8 data bits**
