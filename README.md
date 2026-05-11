@@ -25,7 +25,7 @@ Serial communication transmits bits **one at a time** over a single data line. I
 
 </div>
 
-<br><br>
+<br>
 
 Each data frame consists of:
 - **1 start bit** (always `0`)
@@ -33,7 +33,11 @@ Each data frame consists of:
 - **optional parity bit** (Even / Odd / None)
 - **1 or 2 stop bits** (always `1`)
 
+<br><br>
+
 ### RS-232 Pin Layout (DB9 Connector)
+
+<div align="center">
 
 | Pin | Name | Direction | Description          |
 |-----|------|-----------|----------------------|
@@ -46,6 +50,8 @@ Each data frame consists of:
 | 7   | RTS  | →         | Request To Send      |
 | 8   | CTS  | ←         | Clear To Send        |
 | 9   | RI   | ←         | Ring Indicator       |
+
+</div>
 
 ### Flow Control
 
