@@ -16,14 +16,12 @@ and test equipment.
 Serial communication transmits bits **one at a time** over a single data line. In RS-232, logic states are represented as voltages:
 <br><br>
 
-<div align="center">
   
 | Logic State | Voltage (TxD/RxD) |
 |-------------|-------------------|
 | `1` (MARK)  | −3 V to −15 V     |
 | `0` (SPACE) | +3 V to +15 V     |
 
-</div>
 
 <br>
 
@@ -37,7 +35,7 @@ Each data frame consists of:
 
 ### RS-232 Pin Layout (DB9 Connector)
 
-<div align="center">
+<br>
 
 | Pin | Name | Direction | Description          |
 |-----|------|-----------|----------------------|
@@ -51,11 +49,12 @@ Each data frame consists of:
 | 8   | CTS  | ←         | Clear To Send        |
 | 9   | RI   | ←         | Ring Indicator       |
 
-</div>
 
 ### Flow Control
 
 When a transmitter is faster than the receiver, flow control prevents data loss:
+
+<br>
 
 | Method       | Type     | Description                                        |
 |--------------|----------|----------------------------------------------------|
@@ -67,6 +66,8 @@ When a transmitter is faster than the receiver, flow control prevents data loss:
 ### Null-Modem Cable (Direct DTE↔DTE Connection)
 
 To connect two computers directly without a modem, a crossover (null-modem) cable is used:
+
+<br>
 
 ```
 DTE A          DTE B
@@ -87,6 +88,10 @@ Connectors: **DB9F on both ends.**
 
 ### Mandatory Project Features (OB)
 
+<br>
+
+<div align="center">
+
 | Feature | Description |
 |---------|-------------|
 | **Port selection** | Auto-detection and listing of available ports (`/dev/ttyUSB*`, `/dev/ttyACM*`, `/dev/ttyS*`) |
@@ -98,13 +103,21 @@ Connectors: **DB9F on both ends.**
 | **PING** | Link integrity test with round-trip delay measurement [ms] |
 | **Text TX/RX mode** | Interactive simultaneous send and receive using background thread |
 
+</div>
+
 ### Optional Project Features (OP)
+
+<br>
+
+<div align="center">
 
 | Feature | Description |
 |---------|-------------|
 | **Transaction** | Send a message and wait for a response with a configurable timeout |
 | **Manual DTR/RTS control** | Set or clear DTR/RTS lines on demand; monitor DSR and CTS input states |
 | **Binary (hex) mode** | Interactive hex editor for sending arbitrary bytes; received data displayed in hex |
+
+</div>
 
 ---
 
