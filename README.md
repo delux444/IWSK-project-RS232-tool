@@ -15,10 +15,14 @@ and test equipment.
 
 Serial communication transmits bits **one at a time** over a single data line. In RS-232, logic states are represented as voltages:
 
+<div align="center">
+  
 | Logic State | Voltage (TxD/RxD) |
 |-------------|-------------------|
 | `1` (MARK)  | −3 V to −15 V     |
 | `0` (SPACE) | +3 V to +15 V     |
+
+</div>
 
 Each data frame consists of:
 - **1 start bit** (always `0`)
