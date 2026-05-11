@@ -6,477 +6,576 @@
 #include <string.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <time.h>
+#include <sys/select.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <pthread.h>
 
-enum mode{
-    RECEIVE, SEND, NOACTION
+/* -----------------------------------------------------------------------
+ * Configuration structure
+ * flow_ctrl: 0=none, 1=RTS/CTS, 2=XON/XOFF, 3=DTR/DSR
+ * ----------------------------------------------------------------------- */
+struct serial_conf {
+    char   *port;
+    char   *msg;
+    char   *term;
+    int     do_ping;
+    int     do_transaction;   /* OP 4 */
+    int     transaction_timeout_ms;
+    int     do_manual_ctrl;   /* OP 1.4 */
+    int     set_dtr;          /* OP 1.4: -1=ignore, 0=clear, 1=set */
+    int     set_rts;          /* OP 1.4: -1=ignore, 0=clear, 1=set */
+    int     binary_mode;      /* OP 6.2 */
+    int     do_listen;        /* only RX, no TX */
+    speed_t baud;
+    int     data_bits;        /* 7 or 8 */
+    char    parity;           /* N, E, O */
+    int     stop_bits;        /* 1 or 2 */
+    int     flow_ctrl;        /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
 };
-enum parity{
-    N, E, O, UNKNOWN
+
+volatile int keep_running = 1;
+void handle_sigint(int sig) { (void)sig; keep_running = 0; }
+
+/* ----------------------------------------------------------------------- */
+/* OB 1.2: full baud-rate table (150 b/s … 115 kb/s)                       */
+/* ----------------------------------------------------------------------- */
+typedef struct {
+    int val;
+    speed_t spd;
+} baud_entry;
+static const baud_entry baud_table[] = {
+    {150,    B150},
+    {300,    B300},
+    {600,    B600},
+    {1200,   B1200},
+    {2400,   B2400},
+    {4800,   B4800},
+    {9600,   B9600},
+    {19200,  B19200},
+    {38400,  B38400},
+    {57600,  B57600},
+    {115200, B115200},
+    {0,      0}
 };
-enum control{
-    NOCONTROL, SOFTCONTROL, HARDCONTROL
-};
-struct device{
-    enum mode md;
-    char *terminator;
-    char *name;
-    char *data;
-};
-struct userinput{
-    enum parity par;
-    enum control con;
-    speed_t baudrate;
-    tcflag_t databits;
-    int stopbits;
-};
 
-/* INPUT VALIDATION */
-int handle_input(int, char *[], struct device *, struct userinput *);
-void free_device(struct device *);
-speed_t parse_baudrate(const char *);
-tcflag_t parse_databits(const char *);
-enum parity parse_parity(const char *);
-char* parse_terminator(const char *);
-enum mode parse_mode(const char *);
-
-/* TERMIOS CONFIG */
-void setup_termios(struct termios *, struct userinput *);
-int write_all(int, const char *, size_t);
-int write_to_device(int, char *, char *);
-void listen_device(int);
-
-/* DEBUG FUNCTIONS */
-void print_device(struct device *);
-void print_userinput(struct userinput *);
-const char* parity_to_string(enum parity);
-const char* control_to_string(enum control);
-
-void print_help(const char *);
-
-volatile sig_atomic_t stop = 0;
-void handle_sigint(int sig) {
-    stop = 1;
+speed_t baud_from_int(int b) {
+    for (int i = 0; baud_table[i].val; i++)
+        if (baud_table[i].val == b) return baud_table[i].spd;
+        fprintf(stderr, "[!] Warning: unsupported baud rate %d, defaulting to 9600\n", b);
+    return B9600;
 }
 
-int main(int argc, char *argv[]){
-    signal(SIGINT, handle_sigint);
+/* ----------------------------------------------------------------------- */
+/* OB 1.5: terminator parser                                                */
+/* ----------------------------------------------------------------------- */
+char* parse_terminator(const char* input) {
+    if (!input || strcasecmp(input, "none") == 0) return NULL;
+    if (strcasecmp(input, "CRLF") == 0) return strdup("\r\n");
+    if (strcasecmp(input, "LF")   == 0) return strdup("\n");
+    if (strcasecmp(input, "CR")   == 0) return strdup("\r");
+    /* custom 1-2 char terminator */
+    size_t len = strlen(input);
+    if (len > 2) { fprintf(stderr, "[!] Warning: terminator truncated to 2 chars\n"); len = 2; }
+    char *res = malloc(len + 1);
+    memcpy(res, input, len);
+    res[len] = '\0';
+    return res;
+}
 
-    struct termios term;
-    struct device dev = {NOACTION, NULL, NULL, NULL};
-    struct userinput usr = {N, NOCONTROL, B9600, CS7, 1};
+/* ----------------------------------------------------------------------- */
+/* OB 1.1 + 1.2 + 1.3: port setup                                          */
+/* ----------------------------------------------------------------------- */
+void setup_port(int fd, struct serial_conf *conf) {
+    struct termios tty;
+    if (tcgetattr(fd, &tty) != 0) { perror("tcgetattr"); return; }
 
-    if(handle_input(argc, argv, &dev, &usr) == -1) { return -1; }
+    cfmakeraw(&tty);
+    cfsetispeed(&tty, conf->baud);
+    cfsetospeed(&tty, conf->baud);
 
-    if(!dev.name){
-        fprintf(stderr, "Device not specified\n");
-        return -1;
+    /* 1.2 – character format */
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= (conf->data_bits == 7) ? CS7 : CS8;
+
+    if (conf->parity == 'E') {
+        tty.c_cflag |=  PARENB;
+        tty.c_cflag &= ~PARODD;
+        tty.c_iflag |=  INPCK;
+    } else if (conf->parity == 'O') {
+        tty.c_cflag |= PARENB;
+        tty.c_cflag |= PARODD;
+        tty.c_iflag |= INPCK;
+    } else {
+        tty.c_cflag &= ~PARENB;
+        tty.c_iflag &= ~INPCK;
     }
 
-    int fd = open(dev.name, O_RDWR | O_NOCTTY);
-    if(fd < 0){
-        perror("open failed");
-        return -1;
+    if (conf->stop_bits == 2) tty.c_cflag |=  CSTOPB;
+    else                      tty.c_cflag &= ~CSTOPB;
+
+    /* 1.3 – flow control */
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+
+    switch (conf->flow_ctrl) {
+        case 1: /* RTS/CTS hardware */
+            tty.c_cflag |= CRTSCTS;
+            break;
+        case 2: /* XON/XOFF software */
+            tty.c_iflag |= (IXON | IXOFF);
+            break;
+        case 3: /* DTR/DSR – controlled via TIOCM_* ioctls after open */
+            /* DTR is raised by clearing HUPCL and setting TIOCM_DTR below */
+            tty.c_cflag &= ~HUPCL;
+            break;
+        default: break; /* none */
     }
 
-    if(tcgetattr(fd, &term) < 0){
-        perror("tcgetattr failed");
-        close(fd);
-        return -1;
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cc[VMIN]  = 0;
+    tty.c_cc[VTIME] = 10; /* 1 s read timeout */
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) perror("tcsetattr");
+
+    /* Apply DTR/DSR after termios (flow_ctrl == 3) */
+    if (conf->flow_ctrl == 3) {
+        int mctrl;
+        ioctl(fd, TIOCMGET, &mctrl);
+        mctrl |= TIOCM_DTR;   /* raise DTR to signal "ready" */
+        ioctl(fd, TIOCMSET, &mctrl);
     }
+}
 
-    setup_termios(&term, &usr);
+/* ----------------------------------------------------------------------- */
+/* OP 1.4: manual DTR/RTS control + DSR/CTS monitoring                     */
+/* ----------------------------------------------------------------------- */
+void manual_control(int fd, struct serial_conf *conf) {
+    int mctrl;
+    if (ioctl(fd, TIOCMGET, &mctrl) < 0) { perror("TIOCMGET"); return; }
 
-    if(tcsetattr(fd, TCSANOW, &term) < 0){
-        perror("tcsetattr failed");
-        close(fd);
-        return -1;
-    }
+    if (conf->set_dtr == 1)       mctrl |=  TIOCM_DTR;
+    else if (conf->set_dtr == 0)  mctrl &= ~TIOCM_DTR;
 
-    /* DEBUG FUNCTIONS */
-    print_device(&dev);
-    print_userinput(&usr);
+    if (conf->set_rts == 1)       mctrl |=  TIOCM_RTS;
+    else if (conf->set_rts == 0)  mctrl &= ~TIOCM_RTS;
 
-    if(dev.md == SEND && dev.data){
-        if(write_to_device(fd, dev.data, dev.terminator) < 0){
-            close(fd);
-            free_device(&dev);
+    if (conf->set_dtr != -1 || conf->set_rts != -1)
+        ioctl(fd, TIOCMSET, &mctrl);
+
+    /* Re-read after possible changes */
+    ioctl(fd, TIOCMGET, &mctrl);
+    printf("\033[1;33m[MODEM LINES]\033[0m\n");
+    printf("  DTR: %s   RTS: %s\n",
+           (mctrl & TIOCM_DTR) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m",
+           (mctrl & TIOCM_RTS) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m");
+    printf("  DSR: %s   CTS: %s\n",
+           (mctrl & TIOCM_DSR) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m",
+           (mctrl & TIOCM_CTS) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m");
+}
+
+/* ----------------------------------------------------------------------- */
+/* Raw send helper                                                          */
+/* ----------------------------------------------------------------------- */
+int send_raw(int fd, const char *data, const char *term) {
+    if (!data) return -1;
+    if (write(fd, data, strlen(data)) < 0) { perror("write"); return -1; }
+    if (term && write(fd, term, strlen(term)) < 0) { perror("write term"); return -1; }
+    return 0;
+}
+
+/* Hex-string → bytes, returns byte count or -1 on error */
+int hex_to_bytes(const char *hex, unsigned char *out, size_t max) {
+    size_t len = strlen(hex);
+    if (len % 2 != 0) { fprintf(stderr, "[!] Hex string must have even length\n"); return -1; }
+    size_t n = len / 2;
+    if (n > max) { fprintf(stderr, "[!] Hex payload too large\n"); return -1; }
+    for (size_t i = 0; i < n; i++) {
+        unsigned int byte;
+        if (sscanf(hex + 2*i, "%02x", &byte) != 1) {
+            fprintf(stderr, "[!] Invalid hex byte at position %zu\n", 2*i);
             return -1;
         }
+        out[i] = (unsigned char)byte;
     }
-    else if(dev.md == RECEIVE){
-        listen_device(fd);
-    }
-
-    close(fd);
-    free_device(&dev);
-    return 0;
+    return (int)n;
 }
 
-/* INPUT VALIDATION */
-int handle_input(int argc, char *argv[], struct device *dev, struct userinput *usr){
+/* ----------------------------------------------------------------------- */
+/* OB 5: PING                                                               */
+/* ----------------------------------------------------------------------- */
+void run_ping(int fd, struct serial_conf *conf) {
+    char rx_buf[256];
+    struct timespec t1, t2;
 
-    struct option longopts[] = {
-        {"device", required_argument, 0, 'd'},
-        {"baudrate", required_argument, 0, 'b'},
-        {"databits", required_argument, 0, 'D'},
-        {"parity", required_argument, 0, 'p'},
-        {"stopbits", required_argument, 0, 's'},
-        {"softcontrol", no_argument, 0, 'S'},
-        {"hardcontrol", no_argument, 0, 'H'},
-        {"terminator", required_argument, 0, 't'},
-        {"transfer", required_argument, 0, 'T'},
-        {"mode", required_argument, 0, 'm'},
-        {"help", no_argument, 0, 'h'},
-        {0, 0, 0, 0}
-    };
+    printf("\033[1;36m[PING MODE]\033[0m Sending probe to %s...\n", conf->port);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    send_raw(fd, "PING", conf->term);
 
-    int opt;
-    int optidx;
-    while( (opt = getopt_long(argc, argv, "d:b:D:p:s:S:H:t:T:m:h", longopts, &optidx)) != -1 ){
+    fd_set set;
+    struct timeval tv = {2, 0};
+    FD_ZERO(&set); FD_SET(fd, &set);
 
-        switch(opt){
-
-            case 'd':
-                dev->name = malloc(strlen(optarg) + 1);
-                if(!dev->name) { return -1; }
-                strcpy(dev->name, optarg);
-                break;
-
-            case 'b':
-                usr->baudrate = parse_baudrate(optarg);
-                if(usr->baudrate == B0){ fprintf(stderr, "Invalid baudrate: %s\n", optarg); return -1;}
-                break;
-            case 'D':
-                usr->databits = parse_databits(optarg);
-                if(usr->databits == (tcflag_t)-1) { fprintf(stderr, "Invalid databits: %s\n", optarg); return -1;}
-                break;
-
-            case 'p':
-                usr->par = parse_parity(optarg);
-                if(usr->par == UNKNOWN) { fprintf(stderr, "Unknown parity: %s\n", optarg); return -1; }
-                break;
-
-            case 's':
-                if(strcmp(optarg, "1") == 0) { usr->stopbits = 1; }
-                else if(strcmp(optarg, "2") == 0) { usr->stopbits = 2; }
-                else { fprintf(stderr, "Invalid stopbits: %s\n", optarg); return -1; }
-                break;
-
-            case 'S':
-                usr->con = SOFTCONTROL;
-                break;
-
-            case 'H':
-                usr->con = HARDCONTROL;
-                break;
-
-            case 't':
-            {
-                char *tmp = parse_terminator(optarg);
-                if(!tmp) { fprintf(stderr, "Invalid terminator\n"); return -1; }
-                free(dev->terminator);
-                dev->terminator = tmp;
-                break;
-            }
-            case 'T':
-            {
-                char *tmp = malloc(strlen(optarg) + 1);
-                if(!tmp) return -1;
-                strcpy(tmp, optarg);
-
-                free(dev->data);
-                dev->data = tmp;
-                break;
-            }
-
-            case 'm':
-            {
-                enum mode tmp = parse_mode(optarg);
-                if(tmp == NOACTION && strcmp(optarg, "none") != 0){ fprintf(stderr, "Invalid mode: %s\n", optarg); return -1; }
-                dev->md = tmp;
-                break;
-            }
-            case 'h':
-                print_help(argv[0]);
-                return -1;
-            default:
-                fprintf(stderr, "Unknown option: %c\n", opt);
-                return -1;
-                break;
+    if (select(fd + 1, &set, NULL, NULL, &tv) > 0) {
+        ssize_t n = read(fd, rx_buf, sizeof(rx_buf)-1);
+        if (n > 0) {
+            rx_buf[n] = '\0';
+            clock_gettime(CLOCK_MONOTONIC, &t2);
+            double rtt = (t2.tv_sec - t1.tv_sec)*1000.0
+            + (t2.tv_nsec - t1.tv_nsec)/1e6;
+            printf("\033[32mReceived:\033[0m \"%s\" | \033[1mRTT: %.3f ms\033[0m\n",
+                   rx_buf, rtt);
         }
-    }
-
-    if (!dev->name) {
-        fprintf(stderr, "Missing required option: --device\n");
-        return -1;
-    }
-
-    return 0;
-}
-void free_device(struct device *dev){
-
-    if(dev->terminator != NULL) { free(dev->terminator); }
-    if(dev->name != NULL) { free(dev->name); }
-    if(dev->data != NULL) { free(dev->data); }
-
-}
-speed_t parse_baudrate(const char *str){
-    if(strcmp(str, "150") == 0) return B150;
-    else if(strcmp(str, "200") == 0) return B200;
-    else if(strcmp(str, "300") == 0) return B300;
-    else if(strcmp(str, "600") == 0) return B600;
-    else if(strcmp(str, "1200") == 0) return B1200;
-    else if(strcmp(str, "1800") == 0) return B1800;
-    else if(strcmp(str, "2400") == 0) return B2400;
-    else if(strcmp(str, "4800") == 0) return B4800;
-    else if(strcmp(str, "9600") == 0) return B9600;
-    else if(strcmp(str, "19200") == 0) return B19200;
-    else if(strcmp(str, "38400") == 0) return B38400;
-    else if(strcmp(str, "57600") == 0) return B57600;
-    else if(strcmp(str, "76800") == 0) return B76800;
-    else if(strcmp(str, "115200") == 0) return B115200;
-    return B0; // invalid
-}
-tcflag_t parse_databits(const char *baud){
-    if(strcmp(baud, "5") == 0) { return CS5; }
-    else if(strcmp(baud, "6") == 0) {return CS6; }
-    else if(strcmp(baud, "7") == 0) {return CS7; }
-    else if(strcmp(baud, "8") == 0) {return CS8; }
-
-    return (tcflag_t)-1; // invalid
-}
-enum parity parse_parity(const char *str){
-    if(strcmp(str, "N") == 0 || strcmp(str, "none") == 0) { return N; }
-    else if(strcmp(str, "E") == 0 || strcmp(str, "even") == 0) { return E; }
-    else if(strcmp(str, "O") == 0 || strcmp(str, "odd") == 0) { return O; }
-    return UNKNOWN;
-}
-char* parse_terminator(const char *str){
-    if(strcmp(str, "LF") == 0) { return strdup("\n"); }
-    else if(strcmp(str, "CR") == 0) { return strdup("\r"); }
-    else if(strcmp(str, "CRLF") == 0) { return strdup("\r\n"); }
-
-    return NULL;
-}
-enum mode parse_mode(const char *str){
-    if(strcmp(str, "receive") == 0 || strcmp(str, "recv") == 0) { return RECEIVE; }
-    else if(strcmp(str, "send") == 0) { return SEND; }
-    else if(strcmp(str, "none") == 0) { return NOACTION; }
-
-    return NOACTION;
-}
-
-/* TERMIOS CONFIG */
-void setup_termios(struct termios *term, struct userinput *usr){
-
-    cfmakeraw(term);  // ❗ ważne
-
-    cfsetispeed(term, usr->baudrate);
-    cfsetospeed(term, usr->baudrate);
-
-    term->c_cflag &= ~CSIZE;
-    term->c_cflag |= usr->databits;
-
-    // parity
-    if(usr->par == N) {
-        term->c_cflag &= ~PARENB;
     } else {
-        term->c_cflag |= PARENB;
-        if (usr->par == O)
-            term->c_cflag |= PARODD;
-        else
-            term->c_cflag &= ~PARODD;
+        printf("\033[31mTimeout!\033[0m No response within 2 s.\n");
     }
-
-    // stop bits
-    if(usr->stopbits == 2)
-        term->c_cflag |= CSTOPB;
-    else
-        term->c_cflag &= ~CSTOPB;
-
-    // flow control
-    if(usr->con == SOFTCONTROL)
-        term->c_iflag |= (IXON | IXOFF);
-    else
-        term->c_iflag &= ~(IXON | IXOFF);
-
-    #ifdef CRTSCTS
-    if(usr->con == HARDCONTROL)
-        term->c_cflag |= CRTSCTS;
-    else
-        term->c_cflag &= ~CRTSCTS;
-    #endif
-
-    term->c_cflag |= (CLOCAL | CREAD);
 }
-int write_to_device(int fd, char *data, char *terminator){
 
-    if(data){
-        if(write_all(fd, data, strlen(data)) < 0) { return -1; }
+/* ----------------------------------------------------------------------- */
+/* OP 4: Transaction (send + timed receive)                                 */
+/* ----------------------------------------------------------------------- */
+void run_transaction(int fd, struct serial_conf *conf) {
+    if (!conf->msg) { fprintf(stderr, "Transaction requires -m <msg>\n"); return; }
+    printf("\033[1;35m[TRANSACTION]\033[0m Sending \"%s\" (timeout %d ms)...\n",
+           conf->msg, conf->transaction_timeout_ms);
+
+    send_raw(fd, conf->msg, conf->term);
+
+    char rx_buf[1024];
+    ssize_t total = 0;
+    struct timespec deadline, now;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_nsec += (long)conf->transaction_timeout_ms * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec  += deadline.tv_nsec / 1000000000L;
+        deadline.tv_nsec %= 1000000000L;
     }
 
-    if(terminator){
-        if (write_all(fd, terminator, strlen(terminator)) < 0) { return -1; }
-    }
+    while (total < (ssize_t)(sizeof(rx_buf)-1)) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long ms_left = (deadline.tv_sec - now.tv_sec)*1000
+        + (deadline.tv_nsec - now.tv_nsec)/1000000;
+        if (ms_left <= 0) break;
 
-    return 0;
-}
-int write_all(int fd, const char *buf, size_t len) {
-    size_t total = 0;
+        fd_set set;
+        FD_ZERO(&set); FD_SET(fd, &set);
+        struct timeval tv = {ms_left/1000, (ms_left%1000)*1000};
+        if (select(fd + 1, &set, NULL, NULL, &tv) <= 0) break;
 
-    while(total < len){
-        ssize_t n = write(fd, buf + total, len - total);
-        if(n <= 0) { perror("write failed"); return -1; }
+        ssize_t n = read(fd, rx_buf + total, sizeof(rx_buf)-1-total);
+        if (n <= 0) break;
         total += n;
     }
-    return 0;
+
+    if (total > 0) {
+        rx_buf[total] = '\0';
+        printf("\033[32mResponse:\033[0m \"%s\"\n", rx_buf);
+    } else {
+        printf("\033[31mNo response within %d ms\033[0m\n", conf->transaction_timeout_ms);
+    }
 }
-void listen_device(int fd) {
+
+/* ----------------------------------------------------------------------- */
+/* OB 3: Receiver (text mode)                                               */
+/* ----------------------------------------------------------------------- */
+void run_receiver(int fd) {
     char buf[256];
+    printf("\033[34m[LISTENING]\033[0m Ctrl+C to stop...\n");
+    while (keep_running) {
+        ssize_t n = read(fd, buf, sizeof(buf)-1);
+        if (n > 0) {
+            buf[n] = '\0';
+            printf("%s", buf);
+            fflush(stdout);
+            if (strstr(buf, "PING")) send_raw(fd, "PONG", "\n");
+        }
+        usleep(10000);
+    }
+    printf("\n\033[33mStopped.\033[0m\n");
+}
 
-    while(!stop){
+/* ----------------------------------------------------------------------- */
+/* OB 6.1: Combined TX + RX mode (default)                                 */
+/* Receiver runs in a background thread, TX in main thread via fgets.      */
+/* ----------------------------------------------------------------------- */
+typedef struct { int fd; const char *term; } rx_thread_arg;
 
-        ssize_t n = read(fd, buf, sizeof(buf));
+static void *rx_thread_fn(void *arg) {
+    rx_thread_arg *a = (rx_thread_arg *)arg;
+    char buf[256];
+    while (keep_running) {
+        ssize_t n = read(a->fd, buf, sizeof(buf)-1);
+        if (n > 0) {
+            buf[n] = '\0';
+            /* Print on its own line so it doesn't tangle with TX prompt */
+            printf("\r\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buf);
+            fflush(stdout);
+            if (strstr(buf, "PING")) send_raw(a->fd, "PONG", a->term ? a->term : "\n");
+        }
+        usleep(10000);
+    }
+    return NULL;
+}
 
-        if(n > 0){
-            ssize_t written = 0;
-            while(written < n){
-                ssize_t w = write(STDOUT_FILENO, buf + written, n - written);
-                if(w <= 0){ perror("stdout write failed"); return; }
-                written += w;
+void run_interactive_text(int fd, struct serial_conf *conf) {
+    char tx_buf[1024];
+    printf("\033[1;33m[TX/RX MODE]\033[0m Type message + Enter to send. Empty line or Ctrl+C to quit.\n");
+
+    rx_thread_arg arg = {fd, conf->term};
+    pthread_t rx_tid;
+    pthread_create(&rx_tid, NULL, rx_thread_fn, &arg);
+
+    while (keep_running) {
+        printf("\033[33mTX>\033[0m ");
+        fflush(stdout);
+
+        if (!fgets(tx_buf, sizeof(tx_buf), stdin)) break;
+
+        size_t len = strlen(tx_buf);
+        if (len > 0 && tx_buf[len-1] == '\n') tx_buf[--len] = '\0';
+        if (len == 0) { keep_running = 0; break; }
+
+        send_raw(fd, tx_buf, conf->term);
+    }
+
+    keep_running = 0;
+    pthread_join(rx_tid, NULL);
+    printf("\n\033[33mStopped.\033[0m\n");
+}
+
+/* ----------------------------------------------------------------------- */
+/* OP 6.2: Binary hex mode                                                  */
+/* ----------------------------------------------------------------------- */
+void run_binary_mode(int fd, struct serial_conf *conf) {
+    unsigned char tx_bytes[512];
+    char hex_input[1025];
+
+    if (conf->msg) {
+        /* Send hex string supplied via -m */
+        int n = hex_to_bytes(conf->msg, tx_bytes, sizeof(tx_bytes));
+        if (n < 0) return;
+        printf("\033[1;35m[BINARY]\033[0m Sending %d bytes: ", n);
+        for (int i = 0; i < n; i++) printf("%02X ", tx_bytes[i]);
+        printf("\n");
+        write(fd, tx_bytes, n);
+        if (conf->term) write(fd, conf->term, strlen(conf->term));
+        return;
+    }
+
+    /* Interactive hex editor */
+    printf("\033[1;35m[BINARY MODE]\033[0m Enter bytes as hex pairs (e.g. 41 42 43), empty to quit:\n");
+    while (keep_running) {
+        printf("\033[35mHEX>\033[0m ");
+        fflush(stdout);
+
+        if (!fgets(hex_input, sizeof(hex_input), stdin)) break;
+        size_t len = strlen(hex_input);
+        if (len > 0 && hex_input[len-1] == '\n') hex_input[--len] = '\0';
+        if (len == 0) break;
+
+        /* Remove spaces to get continuous hex string */
+        char compact[1025]; int ci = 0;
+        for (size_t i = 0; i < len; i++)
+            if (hex_input[i] != ' ' && hex_input[i] != '\t')
+                compact[ci++] = hex_input[i];
+        compact[ci] = '\0';
+
+        int n = hex_to_bytes(compact, tx_bytes, sizeof(tx_bytes));
+        if (n < 0) continue;
+
+        printf("  \033[90m[Sending %d bytes:", n);
+        for (int i = 0; i < n; i++) printf(" %02X", tx_bytes[i]);
+        printf("]\033[0m\n");
+
+        write(fd, tx_bytes, n);
+        if (conf->term) write(fd, conf->term, strlen(conf->term));
+
+        /* Show received bytes in hex */
+        fd_set set; struct timeval tv = {1, 0};
+        FD_ZERO(&set); FD_SET(fd, &set);
+        if (select(fd+1, &set, NULL, NULL, &tv) > 0) {
+            unsigned char rx[256];
+            ssize_t rn = read(fd, rx, sizeof(rx));
+            if (rn > 0) {
+                printf("  \033[32m[RX %zd bytes:", rn);
+                for (ssize_t i = 0; i < rn; i++) printf(" %02X", rx[i]);
+                printf("]\033[0m\n");
             }
         }
-        else if (n < 0) { perror("read failed"); return; }
     }
 }
 
-void print_help(const char *prog){
-
-    #define C_RESET   "\033[0m"
-    #define C_BOLD    "\033[1m"
-    #define C_GREEN   "\033[32m"
-    #define C_YELLOW  "\033[33m"
-    #define C_BLUE    "\033[34m"
-    #define C_CYAN    "\033[36m"
-    #define C_RED     "\033[31m"
-
-    printf(C_BOLD C_BLUE "Serial Tool (RS232/UART)\n" C_RESET);
-    printf("Usage: %s [OPTIONS]\n\n", prog);
-
-    printf(C_BOLD C_CYAN "Required:\n" C_RESET);
-    printf("  -d, --device <path>        Serial device (e.g. /dev/ttyUSB0)\n");
-
-    printf(C_BOLD C_CYAN "\nConfiguration:\n" C_RESET);
-    printf("  -b, --baudrate <rate>      Baudrate (e.g. 9600, 115200)\n");
-    printf("  -D, --databits <5|6|7|8>   Number of data bits\n");
-    printf("  -p, --parity <N|E|O>       Parity: None, Even, Odd\n");
-    printf("  -s, --stopbits <1|2>       Stop bits\n");
-
-    printf(C_BOLD C_CYAN "\nFlow control:\n" C_RESET);
-    printf("  -S, --softcontrol          Software flow control (XON/XOFF)\n");
-    printf("  -H, --hardcontrol          Hardware flow control (RTS/CTS)\n");
-
-    printf(C_BOLD C_CYAN "\nTransfer:\n" C_RESET);
-    printf("  -T, --transfer <data>      Data to send\n");
-    printf("  -t, --terminator <CR|LF|CRLF>\n");
-
-    printf(C_BOLD C_CYAN "\nMode:\n" C_RESET);
-    printf("  -m, --mode <send|recv|listen|none>\n");
-
-    printf(C_BOLD C_CYAN "\nExamples:\n" C_RESET);
-    printf("  %s -d /dev/ttyUSB0 -b 9600 -m listen\n", prog);
-    printf("  %s -d /dev/ttyUSB0 -m send -T \"hello\" -t CRLF\n", prog);
-
-    printf(C_BOLD C_YELLOW "\nAbout RS232 / UART:\n" C_RESET);
-    printf("  RS232 is a serial communication standard used to transmit data\n");
-    printf("  between devices (e.g. PC <-> microcontroller).\n\n");
-
-    printf("  Data is sent bit by bit:\n");
-    printf("    [START] [DATA BITS] [PARITY] [STOP]\n\n");
-
-    printf("  Example (8N1):\n");
-    printf("    1 start bit, 8 data bits, no parity, 1 stop bit\n\n");
-
-    printf("  Common parameters:\n");
-    printf("    Baudrate  - speed (e.g. 9600 bps)\n");
-    printf("    Databits  - size of character (5-8 bits)\n");
-    printf("    Parity    - error checking (optional)\n");
-    printf("    Stopbits  - end of frame\n\n");
-
-    printf(C_BOLD C_GREEN "Tips:\n" C_RESET);
-    printf("  - Use CRLF to avoid overwriting lines\n");
-    printf("  - Use socat to create virtual serial ports\n");
-    printf("  - Use 'receive' mode to monitor incoming data\n");
-
-    printf("\n");
-}
-
-/* DEBUG FUNCTIONS */
-void print_device(struct device *dev){
-    printf("[ DEVICE ]\n");
-    switch(dev->md){
-        case RECEIVE:
-            printf("Mode: RECEIVE\n");
-            break;
-
-        case SEND:
-            printf("Mode: SEND\n");
-            break;
-
-        case NOACTION:
-            printf("Mode: NOACTION\n");
-            break;
-
-        default:
-            printf("Mode: UNKNOWN\n");
-            break;
+/* ----------------------------------------------------------------------- */
+/* OB 1.1: List available serial ports                                      */
+/* ----------------------------------------------------------------------- */
+void list_ports() {
+    DIR *d = opendir("/dev");
+    if (!d) { perror("opendir /dev"); return; }
+    struct dirent *e;
+    int found = 0;
+    printf("Available serial ports:\n");
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "ttyUSB", 6) == 0 ||
+            strncmp(e->d_name, "ttyACM", 6) == 0 ||
+            strncmp(e->d_name, "ttyS",   4) == 0)
+        {
+            /* Quick existence check */
+            char path[64];
+            snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+            int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
+            if (fd >= 0) { close(fd); printf("  %s\n", path); found++; }
+        }
     }
-
-    printf("Device name: ");
-    dev->name != NULL ? printf("%s\n", dev->name) : printf("NULL\n");
-
-    printf("Terminator: ");
-    dev->terminator != NULL ? printf("%s\n", dev->terminator) : printf("NULL\n");
-
-    printf("Data: ");
-    dev->data != NULL ? printf("%s\n", dev->data) : printf("NULL\n");
-
-}
-void print_userinput(struct userinput *usr){
-
-    printf("[ USER INPUT ]\n");
-
-    printf("%lu\n", (unsigned long)usr->baudrate);
-    printf("Databits: ");
-
-    switch(usr->databits){
-        case CS5: printf("5\n"); break;
-        case CS6: printf("6\n"); break;
-        case CS7: printf("7\n"); break;
-        case CS8: printf("8\n"); break;
-        default: printf("Unknown\n"); break;
-    }
-
-    printf("Stopbits: %d\n", usr->stopbits);
-
-    printf("Parity: %s\n", parity_to_string(usr->par));
-    printf("Control: %s\n", control_to_string(usr->con));
-}
-const char* parity_to_string(enum parity p){
-    switch(p){
-        case N: return "None";
-        case E: return "Even";
-        case O: return "Odd";
-        default: return "Unknown";
-    }
-}
-const char* control_to_string(enum control c){
-    switch(c){
-        case NOCONTROL: return "No control";
-        case SOFTCONTROL: return "Software";
-        case HARDCONTROL: return "Hardware";
-        default: return "Unknown";
-    }
+    closedir(d);
+    if (!found) printf("  (none found)\n");
 }
 
+/* ----------------------------------------------------------------------- */
+/* Help                                                                     */
+/* ----------------------------------------------------------------------- */
+void print_help(const char *prog) {
+    printf("Usage: %s -d <port> [options]\n\n", prog);
+    printf("OB (mandatory) parameters:\n");
+    printf("  -d <port>     Serial device (e.g. /dev/ttyUSB0)\n");
+    printf("  -b <baud>     Baud rate: 150,300,600,1200,2400,4800,9600,19200,38400,57600,115200\n");
+    printf("  -s <bits>     Data bits: 7 or 8  (default 8)\n");
+    printf("  -p <par>      Parity: N/E/O       (default N)\n");
+    printf("  -S <stop>     Stop bits: 1 or 2   (default 1)\n");
+    printf("  -f <flow>     Flow control: 0=none 1=RTS/CTS 2=XON/XOFF 3=DTR/DSR (default 0)\n");
+    printf("  -t <term>     Terminator: CR LF CRLF or custom 1-2 char (default none)\n");
+    printf("  -m <msg>      Message to send (text or hex in binary mode)\n");
+    printf("  -l            List available serial ports\n");
+    printf("  -h            This help\n");
+    printf("\nModes:\n");
+    printf("  (default)     Interactive text TX/RX mode   [OB 6.1]\n");
+    printf("  --listen      Receive only, no TX           [OB 3]\n");
+    printf("  --ping        PING round-trip test           [OB 5]\n");
+    printf("  --binary      Binary (hex) TX/RX mode       [OP 6.2]\n");
+    printf("  --transaction Transaction with timeout      [OP 4]\n");
+    printf("  --timeout <ms>  Timeout for transaction in ms (default 2000)\n");
+    printf("  --set-dtr <0|1> Set/clear DTR line          [OP 1.4]\n");
+    printf("  --set-rts <0|1> Set/clear RTS line          [OP 1.4]\n");
+    printf("  --monitor     Show modem line status         [OP 1.4]\n");
+}
 
+/* ----------------------------------------------------------------------- */
+/* main                                                                     */
+/* ----------------------------------------------------------------------- */
+int main(int argc, char *argv[]) {
+    signal(SIGINT, handle_sigint);
+
+    struct serial_conf conf = {
+        .port                = NULL,
+        .msg                 = NULL,
+        .term                = NULL,
+        .do_ping             = 0,
+        .do_transaction      = 0,
+        .transaction_timeout_ms = 2000,
+        .do_manual_ctrl      = 0,
+        .set_dtr             = -1,
+        .set_rts             = -1,
+        .binary_mode         = 0,
+        .do_listen           = 0,
+        .baud                = B9600,
+        .data_bits           = 8,
+        .parity              = 'N',
+        .stop_bits           = 1,
+        .flow_ctrl           = 0,
+    };
+
+    enum { OPT_PING = 256, OPT_BIN, OPT_TRANS, OPT_TIMEOUT,
+        OPT_DTR, OPT_RTS, OPT_MONITOR, OPT_LISTEN };
+
+        static struct option long_opts[] = {
+            {"device",      1, 0, 'd'},
+            {"baud",        1, 0, 'b'},
+            {"msg",         1, 0, 'm'},
+            {"term",        1, 0, 't'},
+            {"bits",        1, 0, 's'},
+            {"parity",      1, 0, 'p'},
+            {"stop",        1, 0, 'S'},
+            {"flow",        1, 0, 'f'},
+            {"list",        0, 0, 'l'},
+            {"help",        0, 0, 'h'},
+            {"ping",        0, 0, OPT_PING},
+            {"binary",      0, 0, OPT_BIN},
+            {"transaction", 0, 0, OPT_TRANS},
+            {"timeout",     1, 0, OPT_TIMEOUT},
+            {"set-dtr",     1, 0, OPT_DTR},
+            {"set-rts",     1, 0, OPT_RTS},
+            {"monitor",     0, 0, OPT_MONITOR},
+            {"listen",      0, 0, OPT_LISTEN},
+            {0, 0, 0, 0}
+        };
+
+        int opt;
+        while ((opt = getopt_long(argc, argv, "d:b:m:t:s:p:S:f:lh", long_opts, NULL)) != -1) {
+            switch (opt) {
+                case 'd': conf.port      = strdup(optarg); break;
+                case 'b': conf.baud      = baud_from_int(atoi(optarg)); break;
+                case 'm': conf.msg       = strdup(optarg); break;
+                case 't': conf.term      = parse_terminator(optarg); break;
+                case 's': conf.data_bits = atoi(optarg); break;
+                case 'p': conf.parity    = (optarg[0] >= 'a') ? optarg[0]-32 : optarg[0]; break;
+                case 'S': conf.stop_bits = atoi(optarg); break;
+                case 'f': conf.flow_ctrl = atoi(optarg); break;
+                case 'l': list_ports(); return 0;
+                case 'h': print_help(argv[0]); return 0;
+                case OPT_PING:    conf.do_ping        = 1; break;
+                case OPT_BIN:     conf.binary_mode    = 1; break;
+                case OPT_TRANS:   conf.do_transaction = 1; break;
+                case OPT_TIMEOUT: conf.transaction_timeout_ms = atoi(optarg); break;
+                case OPT_DTR:     conf.set_dtr        = atoi(optarg); conf.do_manual_ctrl = 1; break;
+                case OPT_RTS:     conf.set_rts        = atoi(optarg); conf.do_manual_ctrl = 1; break;
+                case OPT_MONITOR: conf.do_manual_ctrl = 1; break;
+                case OPT_LISTEN:  conf.do_listen      = 1; break;
+                default: fprintf(stderr, "Unknown option. Use -h for help.\n"); return 1;
+            }
+        }
+
+        if (!conf.port) {
+            fprintf(stderr, "Error: device port is required (-d <port>). Use -h for help.\n");
+            return 1;
+        }
+
+        /* OB 1.1: open + verify port exists */
+        int fd = open(conf.port, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        if (fd < 0) {
+            fprintf(stderr, "Error opening %s: %s\n", conf.port, strerror(errno));
+            return 1;
+        }
+
+        /* Restore blocking mode for reads */
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+        setup_port(fd, &conf);
+
+        /* Dispatch */
+        if (conf.do_manual_ctrl) {
+            manual_control(fd, &conf);
+        } else if (conf.do_ping) {
+            run_ping(fd, &conf);
+        } else if (conf.do_transaction) {
+            run_transaction(fd, &conf);
+        } else if (conf.binary_mode) {
+            run_binary_mode(fd, &conf);
+        } else if (conf.msg) {
+            /* Quick one-shot text send */
+            send_raw(fd, conf.msg, conf.term);
+            printf("Message sent to %s\n", conf.port);
+        } else if (conf.do_listen) {
+            run_receiver(fd);
+        } else {
+            /* OB 6.1: interactive text mode */
+            run_interactive_text(fd, &conf);
+        }
+
+        close(fd);
+        free(conf.port);
+        if (conf.msg)  free(conf.msg);
+        if (conf.term) free(conf.term);
+        return 0;
+}
