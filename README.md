@@ -14,7 +14,7 @@ and test equipment.
 ### How It Works
 
 Serial communication transmits bits **one at a time** over a single data line. In RS-232, logic states are represented as voltages:
-
+</br>
 
 <div align="center">
   
