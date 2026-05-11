@@ -239,4 +239,4 @@ serialctrl -d <port> [options]
 ```
 ---
 
-> Course project — *Digital Techniques / Embedded Systems*, Academic Year 2025/2026
+> Course project — *Interfaces in Computer Systems*, Academic Year 2025/2026
