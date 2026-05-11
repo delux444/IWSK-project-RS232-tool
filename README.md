@@ -8,7 +8,8 @@ text and binary transmission modes, link testing (PING), transactions with timeo
 ## What is RS-232 and How Does It Work?
 
 **RS-232** (*Recommended Standard 232*) is one of the oldest and most widely used serial communication standards,  
-developed in 1960 by the EIA organization. Despite its age, it remains common in industrial automation, embedded systems, and test equipment.
+developed in 1960 by the EIA organization. Despite its age, it remains common in industrial automation, embedded systems,  
+and test equipment.
 
 ### How It Works
 
