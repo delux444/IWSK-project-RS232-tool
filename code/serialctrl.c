@@ -13,10 +13,6 @@
 #include <errno.h>
 #include <pthread.h>
 
-/* -----------------------------------------------------------------------
- * Configuration structure
- * flow_ctrl: 0=none, 1=RTS/CTS, 2=XON/XOFF, 3=DTR/DSR
- * ----------------------------------------------------------------------- */
 struct serial_conf {
     char   *port;
     char   *msg;
@@ -37,16 +33,20 @@ struct serial_conf {
 };
 
 volatile int keep_running = 1;
-void handle_sigint(int sig) { (void)sig; keep_running = 0; }
+void handle_sigint(int sig) {
 
-/* ----------------------------------------------------------------------- */
-/* OB 1.2: full baud-rate table (150 b/s … 115 kb/s)                       */
-/* ----------------------------------------------------------------------- */
+    (void)sig;
+    keep_running = 0;
+}
+
 typedef struct {
+
     int val;
     speed_t spd;
 } baud_entry;
+
 static const baud_entry baud_table[] = {
+
     {150,    B150},
     {300,    B300},
     {600,    B600},
@@ -62,41 +62,59 @@ static const baud_entry baud_table[] = {
 };
 
 speed_t baud_from_int(int b) {
-    for (int i = 0; baud_table[i].val; i++)
-        if (baud_table[i].val == b) return baud_table[i].spd;
-        fprintf(stderr, "[!] Warning: unsupported baud rate %d, defaulting to 9600\n", b);
+    for (int i = 0; baud_table[i].val; i++) {
+
+        if (baud_table[i].val == b) {
+            return baud_table[i].spd;
+        }
+    }
+
+    fprintf(stderr, "[!] Warning: unsupported baud rate %d, defaulting to 9600\n", b);
     return B9600;
 }
-
-/* ----------------------------------------------------------------------- */
-/* OB 1.5: terminator parser                                                */
-/* ----------------------------------------------------------------------- */
 char* parse_terminator(const char* input) {
-    if (!input || strcasecmp(input, "none") == 0) return NULL;
-    if (strcasecmp(input, "CRLF") == 0) return strdup("\r\n");
-    if (strcasecmp(input, "LF")   == 0) return strdup("\n");
-    if (strcasecmp(input, "CR")   == 0) return strdup("\r");
+
+    if (!input || strcasecmp(input, "none") == 0) {
+        return NULL;
+    }
+    if (strcasecmp(input, "CRLF") == 0) {
+        return strdup("\r\n");
+    }
+    if (strcasecmp(input, "LF")   == 0) {
+        return strdup("\n");
+    }
+    if (strcasecmp(input, "CR")   == 0) {
+        return strdup("\r");
+    }
+
     /* custom 1-2 char terminator */
     size_t len = strlen(input);
-    if (len > 2) { fprintf(stderr, "[!] Warning: terminator truncated to 2 chars\n"); len = 2; }
+
+    if (len > 2) {
+
+        fprintf(stderr, "[!] Warning: terminator truncated to 2 chars\n");
+        len = 2;
+    }
+
     char *res = malloc(len + 1);
     memcpy(res, input, len);
     res[len] = '\0';
+
     return res;
 }
-
-/* ----------------------------------------------------------------------- */
-/* OB 1.1 + 1.2 + 1.3: port setup                                          */
-/* ----------------------------------------------------------------------- */
 void setup_port(int fd, struct serial_conf *conf) {
+
     struct termios tty;
-    if (tcgetattr(fd, &tty) != 0) { perror("tcgetattr"); return; }
+    if (tcgetattr(fd, &tty) != 0) {
+
+        perror("tcgetattr");
+        return;
+    }
 
     cfmakeraw(&tty);
     cfsetispeed(&tty, conf->baud);
     cfsetospeed(&tty, conf->baud);
 
-    /* 1.2 – character format */
     tty.c_cflag &= ~CSIZE;
     tty.c_cflag |= (conf->data_bits == 7) ? CS7 : CS8;
 
@@ -104,19 +122,24 @@ void setup_port(int fd, struct serial_conf *conf) {
         tty.c_cflag |=  PARENB;
         tty.c_cflag &= ~PARODD;
         tty.c_iflag |=  INPCK;
-    } else if (conf->parity == 'O') {
+    }
+    else if (conf->parity == 'O') {
         tty.c_cflag |= PARENB;
         tty.c_cflag |= PARODD;
         tty.c_iflag |= INPCK;
-    } else {
+    }
+    else {
         tty.c_cflag &= ~PARENB;
         tty.c_iflag &= ~INPCK;
     }
 
-    if (conf->stop_bits == 2) tty.c_cflag |=  CSTOPB;
-    else                      tty.c_cflag &= ~CSTOPB;
+    if (conf->stop_bits == 2) {
+        tty.c_cflag |=  CSTOPB;
+    }
+    else {
+        tty.c_cflag &= ~CSTOPB;
+    }
 
-    /* 1.3 – flow control */
     tty.c_cflag &= ~CRTSCTS;
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
 
@@ -131,39 +154,55 @@ void setup_port(int fd, struct serial_conf *conf) {
             /* DTR is raised by clearing HUPCL and setting TIOCM_DTR below */
             tty.c_cflag &= ~HUPCL;
             break;
-        default: break; /* none */
+        default:
+            break; /* none */
     }
 
     tty.c_cflag |= (CLOCAL | CREAD);
     tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 10; /* 1 s read timeout */
 
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) perror("tcsetattr");
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        perror("tcsetattr");
+    }
 
     /* Apply DTR/DSR after termios (flow_ctrl == 3) */
     if (conf->flow_ctrl == 3) {
+
         int mctrl;
+
         ioctl(fd, TIOCMGET, &mctrl);
         mctrl |= TIOCM_DTR;   /* raise DTR to signal "ready" */
         ioctl(fd, TIOCMSET, &mctrl);
     }
 }
-
-/* ----------------------------------------------------------------------- */
-/* OP 1.4: manual DTR/RTS control + DSR/CTS monitoring                     */
-/* ----------------------------------------------------------------------- */
 void manual_control(int fd, struct serial_conf *conf) {
+
     int mctrl;
-    if (ioctl(fd, TIOCMGET, &mctrl) < 0) { perror("TIOCMGET"); return; }
 
-    if (conf->set_dtr == 1)       mctrl |=  TIOCM_DTR;
-    else if (conf->set_dtr == 0)  mctrl &= ~TIOCM_DTR;
+    if (ioctl(fd, TIOCMGET, &mctrl) < 0) {
 
-    if (conf->set_rts == 1)       mctrl |=  TIOCM_RTS;
-    else if (conf->set_rts == 0)  mctrl &= ~TIOCM_RTS;
+        perror("TIOCMGET");
+        return;
+    }
 
-    if (conf->set_dtr != -1 || conf->set_rts != -1)
+    if (conf->set_dtr == 1) {
+        mctrl |=  TIOCM_DTR;
+    }
+    else if (conf->set_dtr == 0) {
+        mctrl &= ~TIOCM_DTR;
+    }
+
+    if (conf->set_rts == 1) {
+        mctrl |=  TIOCM_RTS;
+    }
+    else if (conf->set_rts == 0) {
+        mctrl &= ~TIOCM_RTS;
+    }
+
+    if (conf->set_dtr != -1 || conf->set_rts != -1){
         ioctl(fd, TIOCMSET, &mctrl);
+    }
 
     /* Re-read after possible changes */
     ioctl(fd, TIOCMGET, &mctrl);
@@ -175,38 +214,55 @@ void manual_control(int fd, struct serial_conf *conf) {
            (mctrl & TIOCM_DSR) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m",
            (mctrl & TIOCM_CTS) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m");
 }
-
-/* ----------------------------------------------------------------------- */
-/* Raw send helper                                                          */
-/* ----------------------------------------------------------------------- */
 int send_raw(int fd, const char *data, const char *term) {
-    if (!data) return -1;
-    if (write(fd, data, strlen(data)) < 0) { perror("write"); return -1; }
-    if (term && write(fd, term, strlen(term)) < 0) { perror("write term"); return -1; }
+
+    if (!data) {
+        return -1;
+    }
+    if (write(fd, data, strlen(data)) < 0) {
+
+        perror("write");
+        return -1;
+    }
+    if (term && write(fd, term, strlen(term)) < 0) {
+
+        perror("write term");
+        return -1;
+    }
     return 0;
 }
-
-/* Hex-string → bytes, returns byte count or -1 on error */
 int hex_to_bytes(const char *hex, unsigned char *out, size_t max) {
+
     size_t len = strlen(hex);
-    if (len % 2 != 0) { fprintf(stderr, "[!] Hex string must have even length\n"); return -1; }
+    if (len % 2 != 0) {
+
+        fprintf(stderr, "[!] Hex string must have even length\n");
+        return -1;
+    }
+
     size_t n = len / 2;
-    if (n > max) { fprintf(stderr, "[!] Hex payload too large\n"); return -1; }
+    if (n > max) {
+
+        fprintf(stderr, "[!] Hex payload too large\n");
+        return -1;
+    }
+
     for (size_t i = 0; i < n; i++) {
+
         unsigned int byte;
         if (sscanf(hex + 2*i, "%02x", &byte) != 1) {
+
             fprintf(stderr, "[!] Invalid hex byte at position %zu\n", 2*i);
             return -1;
         }
+
         out[i] = (unsigned char)byte;
     }
+
     return (int)n;
 }
-
-/* ----------------------------------------------------------------------- */
-/* OB 5: PING                                                               */
-/* ----------------------------------------------------------------------- */
 void run_ping(int fd, struct serial_conf *conf) {
+
     char rx_buf[256];
     struct timespec t1, t2;
 
@@ -219,27 +275,32 @@ void run_ping(int fd, struct serial_conf *conf) {
     FD_ZERO(&set); FD_SET(fd, &set);
 
     if (select(fd + 1, &set, NULL, NULL, &tv) > 0) {
+
         ssize_t n = read(fd, rx_buf, sizeof(rx_buf)-1);
+
         if (n > 0) {
+
             rx_buf[n] = '\0';
             clock_gettime(CLOCK_MONOTONIC, &t2);
-            double rtt = (t2.tv_sec - t1.tv_sec)*1000.0
-            + (t2.tv_nsec - t1.tv_nsec)/1e6;
-            printf("\033[32mReceived:\033[0m \"%s\" | \033[1mRTT: %.3f ms\033[0m\n",
-                   rx_buf, rtt);
+
+            double rtt = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_nsec - t1.tv_nsec)/1e6;
+
+            printf("\033[32mReceived:\033[0m \"%s\" | \033[1mRTT: %.3f ms\033[0m\n", rx_buf, rtt);
         }
-    } else {
+    }
+    else {
         printf("\033[31mTimeout!\033[0m No response within 2 s.\n");
     }
 }
-
-/* ----------------------------------------------------------------------- */
-/* OP 4: Transaction (send + timed receive)                                 */
-/* ----------------------------------------------------------------------- */
 void run_transaction(int fd, struct serial_conf *conf) {
-    if (!conf->msg) { fprintf(stderr, "Transaction requires -m <msg>\n"); return; }
-    printf("\033[1;35m[TRANSACTION]\033[0m Sending \"%s\" (timeout %d ms)...\n",
-           conf->msg, conf->transaction_timeout_ms);
+
+    if (!conf->msg) {
+
+        fprintf(stderr, "Transaction requires -m <msg>\n");
+        return;
+    }
+
+    printf("\033[1;35m[TRANSACTION]\033[0m Sending \"%s\" (timeout %d ms)...\n", conf->msg, conf->transaction_timeout_ms);
 
     send_raw(fd, conf->msg, conf->term);
 
@@ -248,78 +309,143 @@ void run_transaction(int fd, struct serial_conf *conf) {
     struct timespec deadline, now;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_nsec += (long)conf->transaction_timeout_ms * 1000000L;
+
     if (deadline.tv_nsec >= 1000000000L) {
+
         deadline.tv_sec  += deadline.tv_nsec / 1000000000L;
         deadline.tv_nsec %= 1000000000L;
     }
 
     while (total < (ssize_t)(sizeof(rx_buf)-1)) {
+
         clock_gettime(CLOCK_MONOTONIC, &now);
-        long ms_left = (deadline.tv_sec - now.tv_sec)*1000
-        + (deadline.tv_nsec - now.tv_nsec)/1000000;
-        if (ms_left <= 0) break;
+        long ms_left = (deadline.tv_sec - now.tv_sec) * 1000 + (deadline.tv_nsec - now.tv_nsec)/1000000;
+
+        if (ms_left <= 0) {
+            break;
+        }
 
         fd_set set;
         FD_ZERO(&set); FD_SET(fd, &set);
-        struct timeval tv = {ms_left/1000, (ms_left%1000)*1000};
-        if (select(fd + 1, &set, NULL, NULL, &tv) <= 0) break;
+        struct timeval tv = {ms_left/1000, (ms_left % 1000) * 1000};
+
+        if (select(fd + 1, &set, NULL, NULL, &tv) <= 0) {
+            break;
+        }
 
         ssize_t n = read(fd, rx_buf + total, sizeof(rx_buf)-1-total);
-        if (n <= 0) break;
+
+        if (n <= 0) {
+            break;
+        }
+
         total += n;
     }
 
     if (total > 0) {
+
         rx_buf[total] = '\0';
         printf("\033[32mResponse:\033[0m \"%s\"\n", rx_buf);
-    } else {
+    }
+    else {
         printf("\033[31mNo response within %d ms\033[0m\n", conf->transaction_timeout_ms);
     }
 }
-
-/* ----------------------------------------------------------------------- */
-/* OB 3: Receiver (text mode)                                               */
-/* ----------------------------------------------------------------------- */
 void run_receiver(int fd) {
+
     char buf[256];
     printf("\033[34m[LISTENING]\033[0m Ctrl+C to stop...\n");
+
     while (keep_running) {
+
         ssize_t n = read(fd, buf, sizeof(buf)-1);
+
         if (n > 0) {
+
             buf[n] = '\0';
             printf("%s", buf);
             fflush(stdout);
-            if (strstr(buf, "PING")) send_raw(fd, "PONG", "\n");
+
+            if (strstr(buf, "PING")) {
+                send_raw(fd, "PONG", "\n");
+            }
         }
+
         usleep(10000);
     }
+
     printf("\n\033[33mStopped.\033[0m\n");
 }
 
-/* ----------------------------------------------------------------------- */
-/* OB 6.1: Combined TX + RX mode (default)                                 */
-/* Receiver runs in a background thread, TX in main thread via fgets.      */
-/* ----------------------------------------------------------------------- */
-typedef struct { int fd; const char *term; } rx_thread_arg;
+typedef struct {
+    int fd;
+    const char *term;
+} rx_thread_arg;
 
 static void *rx_thread_fn(void *arg) {
+
     rx_thread_arg *a = (rx_thread_arg *)arg;
-    char buf[256];
+    unsigned char buffer[2048];
+    int bytes_in_buffer = 0;
+
     while (keep_running) {
-        ssize_t n = read(a->fd, buf, sizeof(buf)-1);
-        if (n > 0) {
-            buf[n] = '\0';
-            /* Print on its own line so it doesn't tangle with TX prompt */
-            printf("\r\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buf);
-            fflush(stdout);
-            if (strstr(buf, "PING")) send_raw(a->fd, "PONG", a->term ? a->term : "\n");
+
+        fd_set set;
+        struct timeval timeout;
+
+        FD_ZERO(&set);
+        FD_SET(a->fd, &set);
+
+        // timeout 20ms
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 20000;
+
+        int rv = select(a->fd + 1, &set, NULL, NULL, &timeout);
+
+        if (rv == -1) {
+
+            if (errno != EINTR) {
+                break;
+            }
         }
-        usleep(10000);
+        else if (rv == 0) {
+
+            if (bytes_in_buffer > 0) {
+
+                buffer[bytes_in_buffer] = '\0';
+
+                printf("\r\033[2K\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buffer);
+                fflush(stdout);
+
+                if (strstr((char*)buffer, "PING")) {
+                    send_raw(a->fd, "PONG", a->term ? a->term : "\n");
+                }
+
+                bytes_in_buffer = 0;
+            }
+        }
+        else {
+
+            int n = read(a->fd, buffer + bytes_in_buffer, sizeof(buffer) - bytes_in_buffer - 1);
+
+            if (n > 0) {
+
+                bytes_in_buffer += n;
+
+                if (bytes_in_buffer >= (int)sizeof(buffer) - 1) {
+
+                    buffer[bytes_in_buffer] = '\0';
+                    printf("\r\033[32mRX (full)>\033[0m %s\n", buffer);
+                    bytes_in_buffer = 0;
+                }
+            }
+        }
     }
+
     return NULL;
 }
-
 void run_interactive_text(int fd, struct serial_conf *conf) {
+
     char tx_buf[1024];
     printf("\033[1;33m[TX/RX MODE]\033[0m Type message + Enter to send. Empty line or Ctrl+C to quit.\n");
 
@@ -328,14 +454,24 @@ void run_interactive_text(int fd, struct serial_conf *conf) {
     pthread_create(&rx_tid, NULL, rx_thread_fn, &arg);
 
     while (keep_running) {
+
         printf("\033[33mTX>\033[0m ");
         fflush(stdout);
 
-        if (!fgets(tx_buf, sizeof(tx_buf), stdin)) break;
+        if (!fgets(tx_buf, sizeof(tx_buf), stdin)) {
+            break;
+        }
 
         size_t len = strlen(tx_buf);
-        if (len > 0 && tx_buf[len-1] == '\n') tx_buf[--len] = '\0';
-        if (len == 0) { keep_running = 0; break; }
+
+        if (len > 0 && tx_buf[len-1] == '\n') {
+            tx_buf[--len] = '\0';
+        }
+        if (len == 0) {
+
+            keep_running = 0;
+            break;
+        }
 
         send_raw(fd, tx_buf, conf->term);
     }
@@ -344,23 +480,32 @@ void run_interactive_text(int fd, struct serial_conf *conf) {
     pthread_join(rx_tid, NULL);
     printf("\n\033[33mStopped.\033[0m\n");
 }
-
-/* ----------------------------------------------------------------------- */
-/* OP 6.2: Binary hex mode                                                  */
-/* ----------------------------------------------------------------------- */
 void run_binary_mode(int fd, struct serial_conf *conf) {
+
     unsigned char tx_bytes[512];
     char hex_input[1025];
 
     if (conf->msg) {
+
         /* Send hex string supplied via -m */
         int n = hex_to_bytes(conf->msg, tx_bytes, sizeof(tx_bytes));
-        if (n < 0) return;
+        if (n < 0) {
+            return;
+        }
+
         printf("\033[1;35m[BINARY]\033[0m Sending %d bytes: ", n);
-        for (int i = 0; i < n; i++) printf("%02X ", tx_bytes[i]);
+
+        for (int i = 0; i < n; i++) {
+            printf("%02X ", tx_bytes[i]);
+        }
+
         printf("\n");
         write(fd, tx_bytes, n);
-        if (conf->term) write(fd, conf->term, strlen(conf->term));
+
+        if (conf->term) {
+            write(fd, conf->term, strlen(conf->term));
+        }
+
         return;
     }
 
@@ -406,17 +551,21 @@ void run_binary_mode(int fd, struct serial_conf *conf) {
         }
     }
 }
-
-/* ----------------------------------------------------------------------- */
-/* OB 1.1: List available serial ports                                      */
-/* ----------------------------------------------------------------------- */
 void list_ports() {
+
     DIR *d = opendir("/dev");
-    if (!d) { perror("opendir /dev"); return; }
+    if (!d) {
+
+        perror("opendir /dev");
+        return;
+    }
+
     struct dirent *e;
     int found = 0;
     printf("Available serial ports:\n");
+
     while ((e = readdir(d))) {
+
         if (strncmp(e->d_name, "ttyUSB", 6) == 0 ||
             strncmp(e->d_name, "ttyACM", 6) == 0 ||
             strncmp(e->d_name, "ttyS",   4) == 0)
@@ -425,16 +574,20 @@ void list_ports() {
             char path[64];
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
             int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
-            if (fd >= 0) { close(fd); printf("  %s\n", path); found++; }
+            if (fd >= 0) {
+
+                close(fd);
+                printf("  %s\n", path);
+                found++;
+            }
         }
     }
-    closedir(d);
-    if (!found) printf("  (none found)\n");
-}
 
-/* ----------------------------------------------------------------------- */
-/* Help                                                                     */
-/* ----------------------------------------------------------------------- */
+    closedir(d);
+    if (!found) {
+        printf("  (none found)\n");
+    }
+}
 void print_help(const char *prog) {
     printf("Usage: %s -d <port> [options]\n\n", prog);
     printf("OB (mandatory) parameters:\n");
@@ -536,13 +689,14 @@ int main(int argc, char *argv[]) {
         }
 
         if (!conf.port) {
+
             fprintf(stderr, "Error: device port is required (-d <port>). Use -h for help.\n");
             return 1;
         }
 
-        /* OB 1.1: open + verify port exists */
         int fd = open(conf.port, O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (fd < 0) {
+
             fprintf(stderr, "Error opening %s: %s\n", conf.port, strerror(errno));
             return 1;
         }
@@ -556,26 +710,37 @@ int main(int argc, char *argv[]) {
         /* Dispatch */
         if (conf.do_manual_ctrl) {
             manual_control(fd, &conf);
-        } else if (conf.do_ping) {
+        }
+        else if (conf.do_ping) {
             run_ping(fd, &conf);
-        } else if (conf.do_transaction) {
+        }
+        else if (conf.do_transaction) {
             run_transaction(fd, &conf);
-        } else if (conf.binary_mode) {
+        }
+        else if (conf.binary_mode) {
             run_binary_mode(fd, &conf);
-        } else if (conf.msg) {
+        }
+        else if (conf.msg) {
             /* Quick one-shot text send */
             send_raw(fd, conf.msg, conf.term);
             printf("Message sent to %s\n", conf.port);
-        } else if (conf.do_listen) {
+        }
+        else if (conf.do_listen) {
             run_receiver(fd);
-        } else {
-            /* OB 6.1: interactive text mode */
+        }
+        else {
             run_interactive_text(fd, &conf);
         }
 
         close(fd);
         free(conf.port);
-        if (conf.msg)  free(conf.msg);
-        if (conf.term) free(conf.term);
+
+        if (conf.msg) {
+            free(conf.msg);
+        }
+        if (conf.term) {
+            free(conf.term);
+        }
+
         return 0;
 }
