@@ -25,12 +25,13 @@ struct serial_conf {
     int set_rts;        /* OP 1.4: -1=ignore, 0=clear, 1=set */
     int binary_mode;    /* OP 6.2 */
     int do_listen;      /* only RX, no TX */
-    speed_t baud;
-    int data_bits; /* 7 or 8 */
-    char parity;   /* N, E, O */
-    int stop_bits; /* 1 or 2 */
-    int flow_ctrl; /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
+    speed_t baud;       /**/
+    int data_bits;      /* 7 or 8 */
+    char parity;        /* N, E, O */
+    int stop_bits;      /* 1 or 2 */
+    int flow_ctrl;      /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
 };
+
 
 volatile int keep_running = 1;
 void handle_sigint(int sig) { keep_running = 0; }
@@ -38,16 +39,16 @@ void handle_sigint(int sig) { keep_running = 0; }
 typedef struct {
     int val;
     speed_t spd;
-} baud_entry;
+} baud_entry_t;
 
-static const baud_entry baud_table[] = {
+static const baud_entry_t baud_table[] = {{150, B150},     {300, B300},     {600, B600},      {1200, B1200},
+                                          {2400, B2400},   {4800, B4800},   {9600, B9600},    {19200, B19200},
+                                          {38400, B38400}, {57600, B57600}, {115200, B115200}};
 
-    {150, B150},   {300, B300},     {600, B600},     {1200, B1200},   {2400, B2400},     {4800, B4800},
-    {9600, B9600}, {19200, B19200}, {38400, B38400}, {57600, B57600}, {115200, B115200}, {0, 0}};
+speed_t baud_from_int(const int b) {
+    constexpr size_t baud_table_size = sizeof(baud_table) / sizeof(baud_entry_t);
 
-speed_t baud_from_int(int b) {
-    for (int i = 0; baud_table[i].val; i++) {
-
+    for (size_t i = 0; i < baud_table_size; i++) {
         if (baud_table[i].val == b) {
             return baud_table[i].spd;
         }
@@ -58,7 +59,6 @@ speed_t baud_from_int(int b) {
 }
 
 char *parse_terminator(const char *input) {
-
     if (!input || strcasecmp(input, "none") == 0) {
         return NULL;
     }
