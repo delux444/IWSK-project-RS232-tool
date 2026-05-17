@@ -125,7 +125,7 @@ Connectors: **DB9F on both ends.**
 
 ### Requirements
 
-- Linux (tested on Debian 13)
+- Linux (tested on Debian 13) or MacOS (tested with Tahoe 26.5)
 - GCC compiler
 - POSIX threads (`pthreads`) — included in standard `libc`
 - Access to a serial port device (you may need to add your user to the `dialout` group)
