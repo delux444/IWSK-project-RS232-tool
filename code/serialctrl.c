@@ -166,7 +166,6 @@ void manual_control(const int fd, const struct serial_conf *conf) {
     int mctrl;
 
     if (ioctl(fd, TIOCMGET, &mctrl) < 0) {
-
         perror("TIOCMGET");
         return;
     }
@@ -366,10 +365,9 @@ typedef struct {
     const char *term;
 } rx_thread_arg;
 
-static void *rx_thread_fn(void *arg) {
-
+void *rx_thread_fn(void *arg) {
     const rx_thread_arg *a = (rx_thread_arg *) arg;
-    unsigned char buffer[2048];
+    unsigned char buffer[8192];
     int bytes_in_buffer = 0;
 
     while (keep_running) {
@@ -386,15 +384,12 @@ static void *rx_thread_fn(void *arg) {
         const int rv = select(a->fd + 1, &set, nullptr, nullptr, &timeout);
 
         if (rv == -1) {
-
             if (errno != EINTR) {
                 break;
             }
         }
         else if (rv == 0) {
-
             if (bytes_in_buffer > 0) {
-
                 buffer[bytes_in_buffer] = '\0';
 
                 printf("\r\033[2K\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buffer);
@@ -555,7 +550,6 @@ void run_binary_mode(const int fd, const struct serial_conf *conf) {
 void list_ports() {
     DIR *d = opendir("/dev");
     if (!d) {
-
         perror("opendir /dev");
         return;
     }
@@ -567,7 +561,7 @@ void list_ports() {
     while ((e = readdir(d))) {
 
         if (strncmp(e->d_name, "ttyUSB", 6) == 0 || strncmp(e->d_name, "ttyACM", 6) == 0 ||
-            strncmp(e->d_name, "ttyS", 4) == 0) {
+            strncmp(e->d_name, "ttyS", 4) == 0 || strncmp(e->d_name, "cu.usbmodem", 11) == 0) {
             /* Quick existence check */
             char path[64];
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
