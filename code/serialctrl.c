@@ -363,10 +363,10 @@ void run_receiver(const int fd) {
 typedef struct {
     int fd;
     const char *term;
-} rx_thread_arg;
+} rx_thread_arg_t;
 
 void *rx_thread_fn(void *arg) {
-    const rx_thread_arg *a = (rx_thread_arg *) arg;
+    const rx_thread_arg_t *a = (rx_thread_arg_t *) arg;
     unsigned char buffer[8192];
     int bytes_in_buffer = 0;
 
@@ -426,7 +426,7 @@ void run_interactive_text(const int fd, const struct serial_conf *conf) {
     char tx_buf[1024];
     printf("\033[1;33m[TX/RX MODE]\033[0m Type message + Enter to send. Empty line or Ctrl+C to quit.\n");
 
-    rx_thread_arg arg = {fd, conf->term};
+    rx_thread_arg_t arg = {fd, conf->term};
     pthread_t rx_tid;
     pthread_create(&rx_tid, nullptr, rx_thread_fn, &arg);
 
