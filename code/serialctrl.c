@@ -89,11 +89,10 @@ char *parse_terminator(const char *input) {
     return res;
 }
 
-void setup_port(int fd, struct serial_conf *conf) {
+void setup_port(const int fd, const struct serial_conf *conf) {
 
     struct termios tty;
     if (tcgetattr(fd, &tty) != 0) {
-
         perror("tcgetattr");
         return;
     }
@@ -155,7 +154,6 @@ void setup_port(int fd, struct serial_conf *conf) {
 
     /* Apply DTR/DSR after termios (flow_ctrl == 3) */
     if (conf->flow_ctrl == 3) {
-
         int mctrl;
 
         ioctl(fd, TIOCMGET, &mctrl);
@@ -164,8 +162,7 @@ void setup_port(int fd, struct serial_conf *conf) {
     }
 }
 
-void manual_control(int fd, struct serial_conf *conf) {
-
+void manual_control(const int fd, const struct serial_conf *conf) {
     int mctrl;
 
     if (ioctl(fd, TIOCMGET, &mctrl) < 0) {
@@ -201,34 +198,34 @@ void manual_control(int fd, struct serial_conf *conf) {
            (mctrl & TIOCM_CTS) ? "\033[32mSET\033[0m" : "\033[31mCLR\033[0m");
 }
 
-int send_raw(int fd, const char *data, const char *term) {
-
+int send_raw(const int fd, const char *data, const char *term) {
     if (!data) {
         return -1;
     }
-    if (write(fd, data, strlen(data)) < 0) {
 
+    if (write(fd, data, strlen(data)) < 0) {
         perror("write");
         return -1;
     }
+
     if (term && write(fd, term, strlen(term)) < 0) {
 
         perror("write term");
         return -1;
     }
+
     return 0;
 }
 
-int hex_to_bytes(const char *hex, unsigned char *out, size_t max) {
+int hex_to_bytes(const char *hex, unsigned char *out, const size_t max) {
+    const size_t len = strlen(hex);
 
-    size_t len = strlen(hex);
     if (len % 2 != 0) {
-
         fprintf(stderr, "[!] Hex string must have even length\n");
         return -1;
     }
 
-    size_t n = len / 2;
+    const size_t n = len / 2;
     if (n > max) {
 
         fprintf(stderr, "[!] Hex payload too large\n");
@@ -236,10 +233,8 @@ int hex_to_bytes(const char *hex, unsigned char *out, size_t max) {
     }
 
     for (size_t i = 0; i < n; i++) {
-
         unsigned int byte;
         if (sscanf(hex + 2 * i, "%02x", &byte) != 1) {
-
             fprintf(stderr, "[!] Invalid hex byte at position %zu\n", 2 * i);
             return -1;
         }
@@ -250,8 +245,7 @@ int hex_to_bytes(const char *hex, unsigned char *out, size_t max) {
     return (int) n;
 }
 
-void run_ping(int fd, struct serial_conf *conf) {
-
+void run_ping(const int fd, const struct serial_conf *conf) {
     char rx_buf[256];
     struct timespec t1, t2;
 
@@ -273,7 +267,7 @@ void run_ping(int fd, struct serial_conf *conf) {
             rx_buf[n] = '\0';
             clock_gettime(CLOCK_MONOTONIC, &t2);
 
-            double rtt = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_nsec - t1.tv_nsec) / 1e6;
+            const double rtt = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_nsec - t1.tv_nsec) / 1e6;
 
             printf("\033[32mReceived:\033[0m \"%s\" | \033[1mRTT: %.3f ms\033[0m\n", rx_buf, rtt);
         }
@@ -283,8 +277,7 @@ void run_ping(int fd, struct serial_conf *conf) {
     }
 }
 
-void run_transaction(int fd, struct serial_conf *conf) {
-
+void run_transaction(const int fd, const struct serial_conf *conf) {
     if (!conf->msg) {
 
         fprintf(stderr, "Transaction requires -m <msg>\n");
@@ -309,9 +302,8 @@ void run_transaction(int fd, struct serial_conf *conf) {
     }
 
     while (total < (ssize_t) (sizeof(rx_buf) - 1)) {
-
         clock_gettime(CLOCK_MONOTONIC, &now);
-        long ms_left = (deadline.tv_sec - now.tv_sec) * 1000 + (deadline.tv_nsec - now.tv_nsec) / 1000000;
+        const long ms_left = (deadline.tv_sec - now.tv_sec) * 1000 + (deadline.tv_nsec - now.tv_nsec) / 1000000;
 
         if (ms_left <= 0) {
             break;
@@ -345,14 +337,12 @@ void run_transaction(int fd, struct serial_conf *conf) {
     }
 }
 
-void run_receiver(int fd) {
-
+void run_receiver(const int fd) {
     char buf[256];
     printf("\033[34m[LISTENING]\033[0m Ctrl+C to stop...\n");
 
     while (keep_running) {
-
-        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        const ssize_t n = read(fd, buf, sizeof(buf) - 1);
 
         if (n > 0) {
 
@@ -378,12 +368,11 @@ typedef struct {
 
 static void *rx_thread_fn(void *arg) {
 
-    rx_thread_arg *a = (rx_thread_arg *) arg;
+    const rx_thread_arg *a = (rx_thread_arg *) arg;
     unsigned char buffer[2048];
     int bytes_in_buffer = 0;
 
     while (keep_running) {
-
         fd_set set;
         struct timeval timeout;
 
@@ -394,7 +383,7 @@ static void *rx_thread_fn(void *arg) {
         timeout.tv_sec = 0;
         timeout.tv_usec = 20000;
 
-        int rv = select(a->fd + 1, &set, nullptr, nullptr, &timeout);
+        const int rv = select(a->fd + 1, &set, nullptr, nullptr, &timeout);
 
         if (rv == -1) {
 
@@ -420,14 +409,13 @@ static void *rx_thread_fn(void *arg) {
         }
         else {
 
-            int n = read(a->fd, buffer + bytes_in_buffer, sizeof(buffer) - bytes_in_buffer - 1);
+            const int n = read(a->fd, buffer + bytes_in_buffer, sizeof(buffer) - bytes_in_buffer - 1);
 
             if (n > 0) {
 
                 bytes_in_buffer += n;
 
                 if (bytes_in_buffer >= (int) sizeof(buffer) - 1) {
-
                     buffer[bytes_in_buffer] = '\0';
                     printf("\r\033[32mRX (full)>\033[0m %s\n", buffer);
                     bytes_in_buffer = 0;
@@ -439,8 +427,7 @@ static void *rx_thread_fn(void *arg) {
     return nullptr;
 }
 
-void run_interactive_text(int fd, struct serial_conf *conf) {
-
+void run_interactive_text(const int fd, const struct serial_conf *conf) {
     char tx_buf[1024];
     printf("\033[1;33m[TX/RX MODE]\033[0m Type message + Enter to send. Empty line or Ctrl+C to quit.\n");
 
@@ -476,15 +463,13 @@ void run_interactive_text(int fd, struct serial_conf *conf) {
     printf("\n\033[33mStopped.\033[0m\n");
 }
 
-void run_binary_mode(int fd, struct serial_conf *conf) {
-
+void run_binary_mode(const int fd, const struct serial_conf *conf) {
     unsigned char tx_bytes[512];
     char hex_input[1025];
 
     if (conf->msg) {
-
         /* Send hex string supplied via -m */
-        int n = hex_to_bytes(conf->msg, tx_bytes, sizeof(tx_bytes));
+        const int n = hex_to_bytes(conf->msg, tx_bytes, sizeof(tx_bytes));
         if (n < 0) {
             return;
         }
@@ -568,7 +553,6 @@ void run_binary_mode(int fd, struct serial_conf *conf) {
 }
 
 void list_ports() {
-
     DIR *d = opendir("/dev");
     if (!d) {
 
@@ -587,7 +571,7 @@ void list_ports() {
             /* Quick existence check */
             char path[64];
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
-            int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
+            const int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
             if (fd >= 0) {
 
                 close(fd);
@@ -617,15 +601,15 @@ void print_help(const char *prog) {
     printf("  -l            List available serial ports\n");
     printf("  -h            This help\n");
     printf("\nModes:\n");
-    printf("  (default)     Interactive text TX/RX mode   [OB 6.1]\n");
-    printf("  --listen      Receive only, no TX           [OB 3]\n");
-    printf("  --ping        PING round-trip test           [OB 5]\n");
-    printf("  --binary      Binary (hex) TX/RX mode       [OP 6.2]\n");
-    printf("  --transaction Transaction with timeout      [OP 4]\n");
+    printf("  (default)     Interactive text TX/RX mode     [OB 6.1]\n");
+    printf("  --listen      Receive only, no TX             [OB 3]\n");
+    printf("  --ping        PING round-trip test            [OB 5]\n");
+    printf("  --binary      Binary (hex) TX/RX mode         [OP 6.2]\n");
+    printf("  --transaction Transaction with timeout        [OP 4]\n");
     printf("  --timeout <ms>  Timeout for transaction in ms (default 2000)\n");
-    printf("  --set-dtr <0|1> Set/clear DTR line          [OP 1.4]\n");
-    printf("  --set-rts <0|1> Set/clear RTS line          [OP 1.4]\n");
-    printf("  --monitor     Show modem line status         [OP 1.4]\n");
+    printf("  --set-dtr <0|1> Set/clear DTR line            [OP 1.4]\n");
+    printf("  --set-rts <0|1> Set/clear RTS line            [OP 1.4]\n");
+    printf("  --monitor     Show modem line status          [OP 1.4]\n");
 }
 
 /* ----------------------------------------------------------------------- */
@@ -655,25 +639,25 @@ int main(int argc, char *argv[]) {
 
     enum { OPT_PING = 256, OPT_BIN, OPT_TRANS, OPT_TIMEOUT, OPT_DTR, OPT_RTS, OPT_MONITOR, OPT_LISTEN };
 
-    static struct option long_opts[] = {{"device", 1, 0, 'd'},
-                                        {"baud", 1, 0, 'b'},
-                                        {"msg", 1, 0, 'm'},
-                                        {"term", 1, 0, 't'},
-                                        {"bits", 1, 0, 's'},
-                                        {"parity", 1, 0, 'p'},
-                                        {"stop", 1, 0, 'S'},
-                                        {"flow", 1, 0, 'f'},
-                                        {"list", 0, 0, 'l'},
-                                        {"help", 0, 0, 'h'},
-                                        {"ping", 0, 0, OPT_PING},
-                                        {"binary", 0, 0, OPT_BIN},
-                                        {"transaction", 0, 0, OPT_TRANS},
-                                        {"timeout", 1, 0, OPT_TIMEOUT},
-                                        {"set-dtr", 1, 0, OPT_DTR},
-                                        {"set-rts", 1, 0, OPT_RTS},
-                                        {"monitor", 0, 0, OPT_MONITOR},
-                                        {"listen", 0, 0, OPT_LISTEN},
-                                        {0, 0, 0, 0}};
+    static struct option long_opts[] = {{"device", 1, nullptr, 'd'},
+                                        {"baud", 1, nullptr, 'b'},
+                                        {"msg", 1, nullptr, 'm'},
+                                        {"term", 1, nullptr, 't'},
+                                        {"bits", 1, nullptr, 's'},
+                                        {"parity", 1, nullptr, 'p'},
+                                        {"stop", 1, nullptr, 'S'},
+                                        {"flow", 1, nullptr, 'f'},
+                                        {"list", 0, nullptr, 'l'},
+                                        {"help", 0, nullptr, 'h'},
+                                        {"ping", 0, nullptr, OPT_PING},
+                                        {"binary", 0, nullptr, OPT_BIN},
+                                        {"transaction", 0, nullptr, OPT_TRANS},
+                                        {"timeout", 1, nullptr, OPT_TIMEOUT},
+                                        {"set-dtr", 1, nullptr, OPT_DTR},
+                                        {"set-rts", 1, nullptr, OPT_RTS},
+                                        {"monitor", 0, nullptr, OPT_MONITOR},
+                                        {"listen", 0, nullptr, OPT_LISTEN},
+                                        {nullptr, 0, nullptr, 0}};
 
     int opt;
     while ((opt = getopt_long(argc, argv, "d:b:m:t:s:p:S:f:lh", long_opts, nullptr)) != -1) {
