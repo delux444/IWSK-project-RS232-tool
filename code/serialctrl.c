@@ -18,23 +18,24 @@ struct serial_conf {
     char *msg;
     char *term;
     int do_ping;
-    int do_transaction; /* OP 4 */
-    int transaction_timeout_ms;
-    int do_manual_ctrl; /* OP 1.4 */
-    int set_dtr;        /* OP 1.4: -1=ignore, 0=clear, 1=set */
-    int set_rts;        /* OP 1.4: -1=ignore, 0=clear, 1=set */
-    int binary_mode;    /* OP 6.2 */
-    int do_listen;      /* only RX, no TX */
-    speed_t baud;       /**/
-    int data_bits;      /* 7 or 8 */
-    char parity;        /* N, E, O */
-    int stop_bits;      /* 1 or 2 */
-    int flow_ctrl;      /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
+    int do_transaction;         /* OP 4 */
+    int transaction_timeout_ms; /**/
+    int do_manual_ctrl;         /* OP 1.4 */
+    int set_dtr;                /* OP 1.4: -1=ignore, 0=clear, 1=set */
+    int set_rts;                /* OP 1.4: -1=ignore, 0=clear, 1=set */
+    int binary_mode;            /* OP 6.2 */
+    int do_listen;              /* only RX, no TX */
+    speed_t baud;               /**/
+    int data_bits;              /* 7 or 8 */
+    char parity;                /* N, E, O */
+    int stop_bits;              /* 1 or 2 */
+    int flow_ctrl;              /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
 };
 
 
 volatile int keep_running = 1;
 void handle_sigint(int sig) { keep_running = 0; }
+
 
 typedef struct {
     int val;
@@ -44,6 +45,7 @@ typedef struct {
 static const baud_entry_t baud_table[] = {{150, B150},     {300, B300},     {600, B600},      {1200, B1200},
                                           {2400, B2400},   {4800, B4800},   {9600, B9600},    {19200, B19200},
                                           {38400, B38400}, {57600, B57600}, {115200, B115200}};
+
 
 speed_t baud_from_int(const int b) {
     constexpr size_t baud_table_size = sizeof(baud_table) / sizeof(baud_entry_t);
@@ -60,7 +62,7 @@ speed_t baud_from_int(const int b) {
 
 char *parse_terminator(const char *input) {
     if (!input || strcasecmp(input, "none") == 0) {
-        return NULL;
+        return nullptr;
     }
     if (strcasecmp(input, "CRLF") == 0) {
         return strdup("\r\n");
@@ -76,7 +78,6 @@ char *parse_terminator(const char *input) {
     size_t len = strlen(input);
 
     if (len > 2) {
-
         fprintf(stderr, "[!] Warning: terminator truncated to 2 chars\n");
         len = 2;
     }
@@ -263,7 +264,7 @@ void run_ping(int fd, struct serial_conf *conf) {
     FD_ZERO(&set);
     FD_SET(fd, &set);
 
-    if (select(fd + 1, &set, NULL, NULL, &tv) > 0) {
+    if (select(fd + 1, &set, nullptr, nullptr, &tv) > 0) {
 
         ssize_t n = read(fd, rx_buf, sizeof(rx_buf) - 1);
 
@@ -321,7 +322,7 @@ void run_transaction(int fd, struct serial_conf *conf) {
         FD_SET(fd, &set);
         struct timeval tv = {ms_left / 1000, (ms_left % 1000) * 1000};
 
-        if (select(fd + 1, &set, NULL, NULL, &tv) <= 0) {
+        if (select(fd + 1, &set, nullptr, nullptr, &tv) <= 0) {
             break;
         }
 
@@ -393,7 +394,7 @@ static void *rx_thread_fn(void *arg) {
         timeout.tv_sec = 0;
         timeout.tv_usec = 20000;
 
-        int rv = select(a->fd + 1, &set, NULL, NULL, &timeout);
+        int rv = select(a->fd + 1, &set, nullptr, nullptr, &timeout);
 
         if (rv == -1) {
 
@@ -435,7 +436,7 @@ static void *rx_thread_fn(void *arg) {
         }
     }
 
-    return NULL;
+    return nullptr;
 }
 
 void run_interactive_text(int fd, struct serial_conf *conf) {
@@ -445,7 +446,7 @@ void run_interactive_text(int fd, struct serial_conf *conf) {
 
     rx_thread_arg arg = {fd, conf->term};
     pthread_t rx_tid;
-    pthread_create(&rx_tid, NULL, rx_thread_fn, &arg);
+    pthread_create(&rx_tid, nullptr, rx_thread_fn, &arg);
 
     while (keep_running) {
 
@@ -471,7 +472,7 @@ void run_interactive_text(int fd, struct serial_conf *conf) {
     }
 
     keep_running = 0;
-    pthread_join(rx_tid, NULL);
+    pthread_join(rx_tid, nullptr);
     printf("\n\033[33mStopped.\033[0m\n");
 }
 
@@ -552,7 +553,7 @@ void run_binary_mode(int fd, struct serial_conf *conf) {
         struct timeval tv = {1, 0};
         FD_ZERO(&set);
         FD_SET(fd, &set);
-        if (select(fd + 1, &set, NULL, NULL, &tv) > 0) {
+        if (select(fd + 1, &set, nullptr, nullptr, &tv) > 0) {
             unsigned char rx[256];
             ssize_t rn = read(fd, rx, sizeof(rx));
             if (rn > 0) {
@@ -634,9 +635,9 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, handle_sigint);
 
     struct serial_conf conf = {
-        .port = NULL,
-        .msg = NULL,
-        .term = NULL,
+        .port = nullptr,
+        .msg = nullptr,
+        .term = nullptr,
         .do_ping = 0,
         .do_transaction = 0,
         .transaction_timeout_ms = 2000,
@@ -675,7 +676,7 @@ int main(int argc, char *argv[]) {
                                         {0, 0, 0, 0}};
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:b:m:t:s:p:S:f:lh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:b:m:t:s:p:S:f:lh", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'd':
                 conf.port = strdup(optarg);
