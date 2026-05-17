@@ -30,6 +30,7 @@ struct serial_conf {
     char parity;                /* N, E, O */
     int stop_bits;              /* 1 or 2 */
     int flow_ctrl;              /* 0:none 1:RTS/CTS 2:XON/XOFF 3:DTR/DSR */
+    bool clean_shell;
 };
 
 
@@ -363,6 +364,7 @@ void run_receiver(const int fd) {
 typedef struct {
     int fd;
     const char *term;
+    bool clean_shell;
 } rx_thread_arg_t;
 
 void *rx_thread_fn(void *arg) {
@@ -392,8 +394,14 @@ void *rx_thread_fn(void *arg) {
             if (bytes_in_buffer > 0) {
                 buffer[bytes_in_buffer] = '\0';
 
-                printf("\r\033[2K\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buffer);
-                fflush(stdout);
+                if (!a->clean_shell) {
+                    printf("\r\033[2K\033[32mRX>\033[0m %s\n\033[33mTX>\033[0m ", buffer);
+                    fflush(stdout);
+                }
+                else {
+                    printf("%s", buffer);
+                    fflush(stdout);
+                }
 
                 if (strstr((char *) buffer, "PING")) {
                     send_raw(a->fd, "PONG", a->term ? a->term : "\n");
@@ -412,7 +420,10 @@ void *rx_thread_fn(void *arg) {
 
                 if (bytes_in_buffer >= (int) sizeof(buffer) - 1) {
                     buffer[bytes_in_buffer] = '\0';
-                    printf("\r\033[32mRX (full)>\033[0m %s\n", buffer);
+                    if (!a->clean_shell) {
+                        printf("\r\033[32mRX (full)>\033[0m %s\n", buffer);
+                        fflush(stdout);
+                    }
                     bytes_in_buffer = 0;
                 }
             }
@@ -426,14 +437,15 @@ void run_interactive_text(const int fd, const struct serial_conf *conf) {
     char tx_buf[1024];
     printf("\033[1;33m[TX/RX MODE]\033[0m Type message + Enter to send. Empty line or Ctrl+C to quit.\n");
 
-    rx_thread_arg_t arg = {fd, conf->term};
+    rx_thread_arg_t arg = {fd, conf->term, conf->clean_shell};
     pthread_t rx_tid;
     pthread_create(&rx_tid, nullptr, rx_thread_fn, &arg);
 
     while (keep_running) {
-
-        printf("\033[33mTX>\033[0m ");
-        fflush(stdout);
+        if (!conf->clean_shell) {
+            printf("\033[33mTX>\033[0m ");
+            fflush(stdout);
+        }
 
         if (!fgets(tx_buf, sizeof(tx_buf), stdin)) {
             break;
@@ -584,26 +596,28 @@ void list_ports() {
 void print_help(const char *prog) {
     printf("Usage: %s -d <port> [options]\n\n", prog);
     printf("OB (mandatory) parameters:\n");
-    printf("  -d <port>     Serial device (e.g. /dev/ttyUSB0)\n");
-    printf("  -b <baud>     Baud rate: 150,300,600,1200,2400,4800,9600,19200,38400,57600,115200\n");
-    printf("  -s <bits>     Data bits: 7 or 8  (default 8)\n");
-    printf("  -p <par>      Parity: N/E/O       (default N)\n");
-    printf("  -S <stop>     Stop bits: 1 or 2   (default 1)\n");
-    printf("  -f <flow>     Flow control: 0=none 1=RTS/CTS 2=XON/XOFF 3=DTR/DSR (default 0)\n");
-    printf("  -t <term>     Terminator: CR LF CRLF or custom 1-2 char (default none)\n");
-    printf("  -m <msg>      Message to send (text or hex in binary mode)\n");
-    printf("  -l            List available serial ports\n");
-    printf("  -h            This help\n");
+    printf("  -d <port>         Serial device (e.g. /dev/ttyUSB0)\n");
+    printf("  -b <baud>         Baud rate: 150,300,600,1200,2400,4800,9600,19200,38400,57600,115200\n");
+    printf("  -s <bits>         Data bits: 7 or 8  (default 8)\n");
+    printf("  -p <par>          Parity: N/E/O       (default N)\n");
+    printf("  -S <stop>         Stop bits: 1 or 2   (default 1)\n");
+    printf("  -f <flow>         Flow control: 0=none 1=RTS/CTS 2=XON/XOFF 3=DTR/DSR (default 0)\n");
+    printf("  -t <term>         Terminator: CR LF CRLF or custom 1-2 char (default none)\n");
+    printf("  -m <msg>          Message to send (text or hex in binary mode)\n");
+    printf("  -l                List available serial ports\n");
+    printf("  -h                This help\n");
     printf("\nModes:\n");
-    printf("  (default)     Interactive text TX/RX mode     [OB 6.1]\n");
-    printf("  --listen      Receive only, no TX             [OB 3]\n");
-    printf("  --ping        PING round-trip test            [OB 5]\n");
-    printf("  --binary      Binary (hex) TX/RX mode         [OP 6.2]\n");
-    printf("  --transaction Transaction with timeout        [OP 4]\n");
-    printf("  --timeout <ms>  Timeout for transaction in ms (default 2000)\n");
-    printf("  --set-dtr <0|1> Set/clear DTR line            [OP 1.4]\n");
-    printf("  --set-rts <0|1> Set/clear RTS line            [OP 1.4]\n");
-    printf("  --monitor     Show modem line status          [OP 1.4]\n");
+    printf("  (default)         Interactive text TX/RX mode     [OB 6.1]\n");
+    printf("  --listen          Receive only, no TX             [OB 3]\n");
+    printf("  --ping            PING round-trip test            [OB 5]\n");
+    printf("  --binary          Binary (hex) TX/RX mode         [OP 6.2]\n");
+    printf("  --transaction     Transaction with timeout        [OP 4]\n");
+    printf("  --timeout <ms>    Timeout for transaction in ms (default 2000)\n");
+    printf("  --set-dtr <0|1>   Set/clear DTR line            [OP 1.4]\n");
+    printf("  --set-rts <0|1>   Set/clear RTS line            [OP 1.4]\n");
+    printf("  --monitor         Show modem line status          [OP 1.4]\n");
+    printf("  --clean           Run without showing TX/RX at line beginnings\n");
+    printf("  --no-tx-wr        Run without printing user input to stdout\n");
 }
 
 /* ----------------------------------------------------------------------- */
@@ -629,9 +643,20 @@ int main(int argc, char *argv[]) {
         .parity = 'N',
         .stop_bits = 1,
         .flow_ctrl = 0,
+        .clean_shell = false,
     };
 
-    enum { OPT_PING = 256, OPT_BIN, OPT_TRANS, OPT_TIMEOUT, OPT_DTR, OPT_RTS, OPT_MONITOR, OPT_LISTEN };
+    enum {
+        OPT_PING = 256,
+        OPT_BIN,
+        OPT_TRANS,
+        OPT_TIMEOUT,
+        OPT_DTR,
+        OPT_RTS,
+        OPT_MONITOR,
+        OPT_LISTEN,
+        OPT_CLEAN,
+    };
 
     static struct option long_opts[] = {{"device", 1, nullptr, 'd'},
                                         {"baud", 1, nullptr, 'b'},
@@ -651,6 +676,7 @@ int main(int argc, char *argv[]) {
                                         {"set-rts", 1, nullptr, OPT_RTS},
                                         {"monitor", 0, nullptr, OPT_MONITOR},
                                         {"listen", 0, nullptr, OPT_LISTEN},
+                                        {"clean", 0, nullptr, OPT_CLEAN},
                                         {nullptr, 0, nullptr, 0}};
 
     int opt;
@@ -711,6 +737,9 @@ int main(int argc, char *argv[]) {
                 break;
             case OPT_LISTEN:
                 conf.do_listen = 1;
+                break;
+            case OPT_CLEAN:
+                conf.clean_shell = true;
                 break;
             default:
                 fprintf(stderr, "Unknown option. Use -h for help.\n");
